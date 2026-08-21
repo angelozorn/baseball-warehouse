@@ -1,5 +1,7 @@
 venv/
 __pycache__/
-*.csv,
+*.csv
 output/
 *.parquet
+logs/
+target/

@@ -112,7 +112,7 @@ Results after loading Aug 1–7, 2026:
 | 2026-08-03 | 2356 |
 | 2026-08-04 | 4167 |
 | 2026-08-05 | 4376 |
-| 2026-08-06 | 4376 |
+| 2026-08-06 | 3530 |
 | 2026-08-07 | 4355 |
 
 ### Idempotency evidence
@@ -128,7 +128,7 @@ replaces one day's partition rather than appending to the table.
 gcloud storage ls -l "gs://mlb-catcher-framing/raw/statcast/**"
 ```
 
-Seven objects, one per day, sizes matching the local files. A write that
+Eight objects, one per day, sizes matching the local files. A write that
 returned without error is not a verified write.
 
 ---
@@ -213,6 +213,8 @@ against this table to filter on `game_date`, preventing accidental full-table
 scans and the bill that follows. Left off for now; worth revisiting once dbt
 models are querying this table regularly.
 
+**Partition Pruning:** A query filtering WHERE game_date = TIMESTAMP('2026-08-01') scans only that day's partition — roughly 1/7th of the current table and a fixed cost as the table grows — instead of the full table, which is what makes require_partition_filter worth revisiting: it converts a forgotten filter from a silent full scan into an error.
+
 ### GCS overwrite semantics
 
 Re-running a date overwrites the existing object at the same path, and with
@@ -251,7 +253,7 @@ cannot catch.
 
 ### Empty-day behavior
 
-Off-days, the All-Star break, and full rainouts return KerError() on game_date
+Off-days, the All-Star break, and full rainouts raised a KeyError() on game_date
 so no parquet is written.
 ---
 
