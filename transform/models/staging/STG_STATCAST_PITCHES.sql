@@ -1,0 +1,22 @@
+SELECT
+    CAST(GAME_DATE AS DATE)             AS GAME_DATE,
+    FIELDER_2                           AS CATCHER_ID,
+    PITCHER                             AS PITCHER_ID,
+    BATTER                              AS BATTER_ID,
+    GAME_PK,
+    AT_BAT_NUMBER,
+    PITCH_NUMBER,
+    PITCH_TYPE,
+    RELEASE_SPEED,
+    PLATE_X,
+    PLATE_Z,
+    SZ_TOP,
+    SZ_BOT,
+    STAND                               AS BATTER_STANDS,
+    P_THROWS                            AS PITCHER_THROWS,
+    BALLS,
+    STRIKES,
+    DESCRIPTION,
+    EVENTS,
+    TYPE                                AS PITCH_RESULT_TYPE
+FROM {{ source('STATCAST_RAW', 'STATCAST_PITCH_DATA') }}

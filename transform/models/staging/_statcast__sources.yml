@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: STATCAST_RAW
+    database: mlb-catcher-framing
+    schema: STATCAST_RAW_DATA
+    tables:
+      - name: STATCAST_PITCH_DATA
+        description: One row per pitch, loaded by ingest_statcast.py. Partitioned by game_date.
