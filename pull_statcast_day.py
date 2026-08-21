@@ -7,7 +7,7 @@ import seaborn as sns
 cache.enable()
 
 # same start and end date = one day
-df = statcast(start_dt='2026-08-01', end_dt='2026-08-01')
+df = statcast(start_dt='2025-12-01', end_dt='2025-12-01')
 
 #data set sanity check
 ##print(df.shape)
