@@ -20,7 +20,7 @@ uniq_description_counts = df['description'].value_counts()
 
 ### we use description instead of events because description includes pitches where no play result occurs and only a pitch result occurs. 
 
-### the row ordering in pybaseball uses sequential pitches in a game. That is not good for this analysis because it includes pitches where the ball was put in play and we are filtering those out for the analysis. 
+### the row ordering in pybaseball uses reverse chronological order with the newest first. head() shows the last pitches thrown that day and not a random sample.
 
 #print(df['game_pk'].value_counts())
 catcher_ids = df[df["game_pk"] == 824405]["fielder_2"]

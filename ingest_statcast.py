@@ -90,6 +90,17 @@ def get_statcast_day(date):
     df[PARTITION_FIELD] = pd.to_datetime(df[PARTITION_FIELD]).astype("datetime64[us]")
     for col in df.select_dtypes(include=["datetime64[ns]"]).columns:
         df[col] = df[col].astype("datetime64[us]")
+
+    dates = df[PARTITION_FIELD].unique()
+    if len(dates) != 1:
+        raise VerificationError(
+            f"expected one game_date for {date}, found {len(dates)}: {sorted(dates)}"
+        )
+    if not (df[PARTITION_FIELD].dt.normalize() == df[PARTITION_FIELD]).all():
+        raise VerificationError(
+            f"{PARTITION_FIELD} has a time component; UTC-day partitioning would drift"
+        )
+
     return df
 
 
@@ -156,7 +167,6 @@ def load_to_bigquery(date):
 if __name__ == "__main__":
     args = parse_args()
     df = get_statcast_day(args.date)
-    print(df['game_date'].dtype, df['game_date'].nunique())
     out_path = write_parquet(df, args.date)
     verify_parquet(df, out_path)
     uri = upload_to_gcs(out_path, args.date)

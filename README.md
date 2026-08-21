@@ -106,11 +106,12 @@ Results after loading Aug 1–7, 2026:
 
 | game_date | pitches |
 |---|---|
-| 2026-08-01 | 4215 |
-| 2026-08-02 | 4438 |
-| 2026-08-03 | 4321 |
-| 2026-08-04 | 2356 |
-| 2026-08-05 | 4167 |
+| 2025-06-01 | 4215 |
+| 2026-08-01 | 4438 |
+| 2026-08-02 | 4321 |
+| 2026-08-03 | 2356 |
+| 2026-08-04 | 4167 |
+| 2026-08-05 | 4376 |
 | 2026-08-06 | 4376 |
 | 2026-08-07 | 4355 |
 
@@ -224,7 +225,7 @@ latter.
 ### Why Parquet
 
 A single day of Statcast data is 2.5 MB as CSV and 798 KB as Parquet, a 3.2x
-reduction. The columnar layout compresses well because most of the ~90 columns
+reduction. The columnar layout compresses well because most of the 119 columns
 are repetitive floats and low-cardinality strings.
 
 3.2x is modest for Parquet, and that's a fact about this data rather than a
@@ -234,7 +235,7 @@ run-length-encode well.
 
 The size ratio is the easy half of the argument. The half that matters more once
 the data sits in GCS is that a query touching four columns reads four columns,
-not all ninety — a bandwidth and cost argument rather than a storage one.
+not all 119 — a bandwidth and cost argument rather than a storage one.
 
 ### CLI: positional date argument
 
@@ -250,7 +251,7 @@ cannot catch.
 
 ### Empty-day behavior
 
-Off-days, the All-Star break, and full rainouts return a `(0, 0)` DataFrame
+Off-days, the All-Star break, and full rainouts return KerError() on game_date
 so no parquet is written.
 ---
 
