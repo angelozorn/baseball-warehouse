@@ -262,3 +262,13 @@ so no parquet is written.
 `.gitignore` covers `output/`, `*.parquet`, `*.csv`, `venv/`, and
 `__pycache__/`. Data belongs in GCS, never in the repo — `output/` covers the
 location and `*.parquet` covers the mistake of writing somewhere else.
+
+## Schema, Datasets, Tables, SQL - Uppercase
+
+Personal preference. Everything will be uppercase.
+
+## Exploratory Findings
+
+Not all takes are good data points for the model. Some are clearly strikes (right down the middle), and some are clearly balls (in the other batter's box). We will be filtering to pitches around the strike zone edges for the model. 
+
+I don't understand mathematically how batter height creates the strike zone.
