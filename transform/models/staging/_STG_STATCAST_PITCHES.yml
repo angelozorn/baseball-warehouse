@@ -1,0 +1,40 @@
+version: 2
+
+models:
+  - name: STG_STATCAST_PITCHES
+    description: One row per pitch, cleaned and renamed. Same grain as source.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - GAME_PK
+              - AT_BAT_NUMBER
+              - PITCH_NUMBER
+    columns:
+      - name: GAME_DATE
+        data_tests: [not_null]
+      - name: GAME_PK
+        data_tests: [not_null]
+      - name: CATCHER_ID
+        data_tests: [not_null]
+      - name: DESCRIPTION
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - ball
+                  - foul
+                  - hit_into_play
+                  - called_strike
+                  - swinging_strike
+                  - blocked_ball
+                  - foul_tip
+                  - swinging_strike_blocked
+                  - automatic_ball
+                  - hit_by_pitch
+                  - foul_bunt
+                  - missed_bunt
+                  - automatic_strike
+                  - bunt_foul_tip
+                  - pitchout

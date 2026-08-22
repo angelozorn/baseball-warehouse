@@ -1,0 +1,8 @@
+SELECT
+    GAME_PK,
+    AT_BAT_NUMBER,
+    PITCH_NUMBER,
+    DESCRIPTION
+FROM {{ ref('STG_STATCAST_PITCHES') }}
+WHERE PLATE_X IS NULL
+  AND DESCRIPTION NOT IN ('automatic_ball', 'automatic_strike')
