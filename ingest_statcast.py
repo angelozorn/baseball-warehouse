@@ -7,6 +7,7 @@ import pandas as pd
 from google.cloud import storage
 from google.cloud import bigquery
 from google.api_core.exceptions import NotFound
+import sys
 
 
 
@@ -87,6 +88,8 @@ def valid_date(s):
 
 def get_statcast_day(date):
     df = statcast(start_dt=date, end_dt=date)
+    if df.empty:
+        return df                      # no games; caller decides
     df[PARTITION_FIELD] = pd.to_datetime(df[PARTITION_FIELD]).astype("datetime64[us]")
     for col in df.select_dtypes(include=["datetime64[ns]"]).columns:
         df[col] = df[col].astype("datetime64[us]")
@@ -100,7 +103,6 @@ def get_statcast_day(date):
         raise VerificationError(
             f"{PARTITION_FIELD} has a time component; UTC-day partitioning would drift"
         )
-
     return df
 
 
@@ -167,10 +169,13 @@ def load_to_bigquery(date):
 if __name__ == "__main__":
     args = parse_args()
     df = get_statcast_day(args.date)
+    if df.empty:
+        print(f"{args.date}: no games, nothing to load")
+        sys.exit(0)
     out_path = write_parquet(df, args.date)
     verify_parquet(df, out_path)
     uri = upload_to_gcs(out_path, args.date)
     table_id = load_to_bigquery(args.date)
-    print(f"{args.date}: {df.shape[0]} pitches -> {uri}")
+    print(f"{args.date}: {df.shape[0]} pitches -> {uri} -> {table_id}")
 
    

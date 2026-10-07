@@ -1,0 +1,41 @@
+version: 2
+
+models:
+  - name: FCT_TAKES
+    description: >
+      One row per taken pitch (ball or called_strike). Swings, bunts, hit-by-pitch,
+      pitchouts, blocked balls and automatic rulings are excluded — see the
+      takes-filter decision in the README. Location is guaranteed non-null at
+      this grain, which is why the location assertions relocated here from staging.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - GAME_PK
+              - AT_BAT_NUMBER
+              - PITCH_NUMBER
+    columns:
+      - name: GAME_DATE
+        data_tests: [not_null]
+      - name: GAME_PK
+        data_tests: [not_null]
+      - name: CATCHER_ID
+        data_tests: [not_null]
+      - name: PLATE_X
+        data_tests: [not_null]
+      - name: PLATE_Z
+        data_tests: [not_null]
+      - name: SZ_TOP
+        data_tests: [not_null]
+      - name: SZ_BOT
+        data_tests: [not_null]
+      - name: PLATE_Z_NORM
+        data_tests: [not_null]
+      - name: IS_CALLED_STRIKE
+        data_tests: [not_null]
+      - name: DESCRIPTION
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [ball, called_strike]
