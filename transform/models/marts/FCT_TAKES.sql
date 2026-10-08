@@ -9,6 +9,10 @@ WITH TAKES AS (
     SELECT *
     FROM {{ ref('STG_STATCAST_PITCHES') }}
     WHERE DESCRIPTION IN ('ball', 'called_strike')
+      AND PLATE_X IS NOT NULL
+      AND PLATE_Z IS NOT NULL
+      AND SZ_TOP  IS NOT NULL
+      AND SZ_BOT  IS NOT NULL
 
 )
 

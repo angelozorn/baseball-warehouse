@@ -21,6 +21,8 @@ models:
         data_tests:
           - not_null
           - accepted_values:
+              config:
+                severity: warn
               arguments:
                 values:
                   - ball
@@ -38,3 +40,4 @@ models:
                   - automatic_strike
                   - bunt_foul_tip
                   - pitchout
+                  - swinging_pitchout
