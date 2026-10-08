@@ -10,7 +10,7 @@
 
 set -Eeuo pipefail
 
-REPO="$HOME/Desktop/032226 projects/baseball-warehouse"
+REPO="$HOME/baseball-warehouse"
 LOG_DIR="$REPO/logs"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/daily_$(date +%Y-%m-%d).log"

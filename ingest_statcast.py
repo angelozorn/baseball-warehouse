@@ -4,6 +4,11 @@ Exit codes:
     0  success — a day's events were written, uploaded and loaded
     3  no games on that date (off-day, All-Star break, full rainout)
     1  anything else (validation failure, network, BigQuery error)
+
+Every external dependency is named explicitly rather than inferred from the
+environment — the GCP project included. This script runs under launchd, which
+provides a minimal environment that does not reach the gcloud config, so
+anything ambient works in a terminal and fails on a schedule.
 """
 
 import argparse
@@ -19,6 +24,8 @@ from pybaseball import cache, statcast
 cache.enable()
 
 # --- configuration ----------------------------------------------------------
+
+GCP_PROJECT = "mlb-catcher-framing"
 
 LOCAL_ROOT = Path("output")
 GCS_BUCKET = "mlb-catcher-framing"
@@ -57,8 +64,8 @@ def blob_path(date):
     return f"{GCS_PREFIX}/{partition_tail(date)}"
 
 
-def table_ref(client):
-    return f"{client.project}.{BQ_DATASET}.{BQ_TABLE}"
+def table_ref():
+    return f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}"
 
 
 # --- CLI --------------------------------------------------------------------
@@ -137,10 +144,10 @@ def conform_to_table_schema(df):
     Nothing else is coerced. Narrowing a populated column would lose data and
     should fail loudly rather than be silently repaired.
     """
-    client = bigquery.Client()
+    client = bigquery.Client(project=GCP_PROJECT)
 
     try:
-        table = client.get_table(table_ref(client))
+        table = client.get_table(table_ref())
     except NotFound:
         return df  # first load — autodetect establishes the schema
 
@@ -217,7 +224,7 @@ def verify_parquet(df, path):
 
 def upload_to_gcs(local_file, date):
     """Upload a local Parquet file to its partition path in GCS."""
-    client = storage.Client()
+    client = storage.Client(project=GCP_PROJECT)
     bucket = client.bucket(GCS_BUCKET)
     blob = bucket.blob(blob_path(date))
     blob.upload_from_filename(local_file)
@@ -232,8 +239,8 @@ def load_to_bigquery(date):
     The first load has no table to decorate, so it creates one partitioned
     on game_date.
     """
-    client = bigquery.Client()
-    table_id = table_ref(client)
+    client = bigquery.Client(project=GCP_PROJECT)
+    table_id = table_ref()
     uri = f"gs://{GCS_BUCKET}/{blob_path(date)}"
 
     try:

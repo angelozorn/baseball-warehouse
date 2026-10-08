@@ -1,17 +1,18 @@
 # baseball-warehouse
 
 Pitch-level Statcast ingestion into BigQuery, transformed with dbt into a
-modeling-ready fact table of taken pitches.
+modeling-ready fact table of taken pitches, on a daily schedule.
 
 `ingest_statcast.py` pulls a single day of Statcast data from Baseball Savant,
 writes it to a partitioned local Parquet file, verifies the write round-trips,
 uploads it to GCS, and loads it into BigQuery — replacing that day's partition
 atomically so re-runs are safe. dbt then cleans that raw table into a staging
 view and filters it into `FCT_TAKES`, the fact table a catcher-framing model
-reads.
+reads. A launchd agent runs the whole chain every morning.
 
-The warehouse currently holds the full 2026 regular season: 184 game days,
-716,792 events, 356,498 takes.
+The warehouse holds the full 2026 regular season: 184 game days, 716,792
+events, 356,498 takes — plus postseason games as they are played, which staging
+keeps and the mart excludes.
 
 ---
 
@@ -19,6 +20,8 @@ The warehouse currently holds the full 2026 regular season: 184 game days,
 
 ```
 Baseball Savant  ──(pybaseball)──▶  pandas DataFrame
+                                          │
+                                   conform to table schema
                                           │
                                           ▼
                           output/dt=<date>/statcast.parquet   (local)
@@ -38,7 +41,7 @@ Baseball Savant  ──(pybaseball)──▶  pandas DataFrame
                                           │
                                         ref()
                                           ▼
-              DBT_DEV.FCT_TAKES                     (table — takes only)
+              DBT_DEV.FCT_TAKES                     (table — regular-season takes)
 ```
 
 Every ingest layer derives its path from a single function, `partition_tail(date)`,
@@ -96,6 +99,9 @@ dbt deps
 dbt debug
 ```
 
+**Location matters for the repo itself.** It must not live under `~/Desktop`,
+`~/Documents` or `~/Downloads` — see *Nothing ambient* under Scheduling.
+
 ---
 
 ## Usage
@@ -112,8 +118,8 @@ later as an empty result.
 
 ### Backfill a range
 
-`backfill.sh` walks the 2026 regular season. Two properties matter at 187 days
-that did not matter at seven:
+`backfill.sh` walks a date range. Two properties matter at 187 days that did not
+matter at seven:
 
 - **Failures are logged, not fatal.** One transient network blip should not cost
   the remaining five months. Each failed date is appended to
@@ -135,9 +141,79 @@ re-run.
 
 ```bash
 cd transform
-dbt run
-dbt test
+dbt build
 ```
+
+---
+
+## Scheduling
+
+A launchd agent (`com.angelozorn.statcast-daily`) runs `run_daily.sh` at 06:37
+daily: ingest the previous day's games, then `dbt build`.
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.angelozorn.statcast-daily.plist
+launchctl kickstart -k gui/$(id -u)/com.angelozorn.statcast-daily   # fire now
+launchctl list | grep statcast                                      # PID, last exit status
+```
+
+launchd ignores edits to a loaded job, so any plist change needs `bootout` then
+`bootstrap` again.
+
+### Why launchd rather than cron
+
+The usual framing — "cron is old, launchd is the macOS way" — is weak. The real
+argument is that **cron does not fire missed jobs**. A 6am cron job on a closed
+laptop simply does not run, and the gap is discovered days later. launchd's
+`StartCalendarInterval` fires the job when the machine next wakes. On a machine
+that sleeps, that difference is the whole point.
+
+### Two heartbeats, not one
+
+- `last_run.txt` — the scheduler fired and the run completed
+- `last_data_loaded.txt` — data actually arrived
+
+They are separate because a single stamp would be refreshed daily by offseason
+no-ops, so a pipeline that silently broke in February would still look healthy.
+In the offseason the first advances daily while the second goes stale, which is
+correct. In season, a widening gap between them is the alarm.
+
+A failure writes neither. `set -Eeuo pipefail` means the stamps are unreachable
+unless everything above them succeeded, so a heartbeat cannot lie by being
+written on a partial run.
+
+### Failure visibility
+
+A scheduled job that fails silently is worse than no job, because it
+manufactures confidence: you stop thinking about ingestion and the data quietly
+stops arriving. Failures write a `FAILED` line to the day's log and raise a
+macOS notification. Both paths were deliberately exercised before the agent was
+loaded — a failure path that has never been watched fire is not a failure path.
+
+### Nothing ambient
+
+Two bugs surfaced only under the scheduler, and both had the same cause: the
+script depended on something its environment supplied rather than something it
+stated.
+
+**The repository had to move off `~/Desktop`.** macOS TCC protects `~/Desktop`,
+`~/Documents` and `~/Downloads`, and a launchd agent runs with less privilege
+than a terminal, so the job failed with exit 126 (`Operation not permitted`)
+while the identical command worked by hand. Granting Full Disk Access to
+`/bin/bash` would have fixed it, but that is a broad grant — every script
+anything runs through bash would gain it — to buy one scheduled job. Moving the
+repo to `~/baseball-warehouse` avoids TCC entirely. The cost was recreating the
+virtualenv, since a venv bakes its absolute path into `bin/activate`.
+
+**The GCP project had to be named explicitly.** `bigquery.Client()` resolves the
+project from ambient gcloud config, which launchd's minimal environment does not
+reach: `Project was not passed and could not be determined from the
+environment`. A `GCP_PROJECT` constant is now passed to every client. The
+general rule this produced: a scheduled job should depend on nothing it does not
+state.
+
+Neither failure can reproduce by hand, which is why the agent was kickstarted
+immediately rather than left to fire at 06:37.
 
 ---
 
@@ -145,9 +221,10 @@ dbt test
 
 ### Test suite
 
-`dbt test` runs 19 data tests — 7 on staging, 12 on the mart. 18 pass; one
-(`ASSERT_UNEXPLAINED_NULL_LOCATION_RATE`) warns with 369 rows by design, which is
-the tracking-failure rate being reported rather than suppressed.
+`dbt build` runs 23 data tests — 10 on staging, 13 on the mart — interleaved
+with the models so a model whose tests fail is not used downstream. All pass
+except `ASSERT_UNEXPLAINED_NULL_LOCATION_RATE`, which warns with 369 rows by
+design: the tracking-failure rate is reported rather than suppressed.
 
 ### Season coverage
 
@@ -171,6 +248,19 @@ table, contaminating every figure computed from it. The partition was dropped by
 decorator (`bq rm -t '...$20250601'`), a metadata operation rather than a DELETE,
 and every number below was re-measured afterward.
 
+### Game type
+
+```sql
+SELECT game_type, COUNT(*) AS n, MIN(game_date), MAX(game_date)
+FROM `mlb-catcher-framing.STATCAST_RAW_DATA.STATCAST_PITCH_DATA`
+GROUP BY game_type ORDER BY n DESC;
+```
+
+pybaseball's query string hardcodes `hfGT=R|PO|S|` — regular season, postseason
+**and spring training** — so the backfill window being regular-season-only was
+luck rather than design. Verified `R`-only at 716,792 events before the mart
+filter was added, and the filter now guarantees it going forward.
+
 ### Rows per day
 
 ```sql
@@ -180,7 +270,8 @@ GROUP BY game_date
 ORDER BY game_date;
 ```
 
-A spot-check across one week, showing the day-to-day range a full slate produces:
+A spot-check across one week, showing the day-to-day range a full slate
+produces:
 
 | game_date | pitches |
 |---|---|
@@ -207,8 +298,8 @@ replaces one day's partition rather than appending to the table.
 gcloud storage ls -l "gs://mlb-catcher-framing/raw/statcast/**"
 ```
 
-184 objects, one per game day, sizes matching the local files. A write that
-returned without error is not a verified write.
+One object per game day, sizes matching the local files. A write that returned
+without error is not a verified write.
 
 ### Mart reconciliation
 
@@ -233,11 +324,15 @@ Full 2026 regular season:
 
 Takes fraction: **49.92%** of thrown pitches by description, 49.90% after the
 tracking filter. The seven-day August sample measured 50.03% — representative on
-this measure, though not on two others (see *What a full season changed* below).
+this measure, though not on two others (see *What a full season changed*).
 
 The denominator is **thrown pitches**, not all events. Automatic ball and strike
 rulings are excluded from both sides of the ratio, because with no pitch thrown
 neither a take nor a swing was possible.
+
+Note that this query is run against a live table: once postseason games land in
+raw, `THROWN_PITCHES` grows while `TAKES` does not, because the mart is
+restricted to `game_type = 'R'`.
 
 ---
 
@@ -262,6 +357,23 @@ directly from the file. Hand-maintaining a 119-column schema would add drift
 risk and maintenance work for no fidelity gain — and it would be the same kind
 of type opinion the raw layer explicitly defers to staging. Autodetect keeps
 that deferral consistent across both the file and the table.
+
+**What autodetect costs.** Per-file type inference is not stable across days of
+different sizes. pandas types a column with no values at all as `Int64`, so a
+column that happens to be entirely null on one day arrives as INTEGER where the
+table holds FLOAT, and the partition load is rejected. This surfaced on the
+first playoff day — 598 events, with `arm_angle` empty throughout — after 184
+full regular-season days never triggered it.
+
+The fix is `conform_to_table_schema()`, which casts all-null columns to whatever
+the table already holds and widens integers into FLOAT columns. Both conversions
+are lossless; nothing else is coerced, because narrowing a populated column
+would lose data and should fail loudly instead.
+
+So autodetect buys freedom from maintaining 119 column types and charges a
+conform step that partially reconstructs the same discipline. Still the better
+trade — a hand-maintained schema would be worse to own — but it is a trade, not
+a free win.
 
 ### One deliberate exception: timestamp precision
 
@@ -298,7 +410,8 @@ has no such window: the load either fully replaces the partition or leaves it
 exactly as it was. There is no intermediate state a crash can strand you in.
 
 That property paid off directly during the season backfill, where a resumable
-187-day loop re-runs any interrupted day without a cleanup step.
+187-day loop re-runs any interrupted day without a cleanup step — and again on
+every failed daily run, each of which could simply be retried.
 
 **Why this over append-and-never-rerun.** The problem isn't that duplicates
 appear — it's that they are undetectable afterward. Statcast ships no clean
@@ -313,16 +426,17 @@ partition value falls outside the targeted partition. The path claims
 than misfiling them. The filename's claim about its contents is enforced by the
 engine rather than trusted.
 
-**What it cost.** This design is why the timestamp-precision and string-date
-bugs surfaced at all. Delete-then-load would have accepted both — the nanosecond
-column would have loaded as `INT64` and the string dates as `STRING` — and the
-problem would have appeared much later, in a dbt model or in a framing number
-that looked only slightly off. The strictness is the feature.
+**What it cost.** This design is why the timestamp-precision, string-date and
+all-null-column bugs surfaced at all. Delete-then-load would have accepted them
+— the nanosecond column as `INT64`, the string dates as `STRING`, the empty
+column as INTEGER — and the problem would have appeared much later, in a dbt
+model or in a framing number that looked only slightly off. The strictness is
+the feature.
 
 **Considered and deferred:** `require_partition_filter` would force every query
 against this table to filter on `game_date`, preventing accidental full-table
 scans and the bill that follows. Left off for now; worth revisiting now that dbt
-models query this table regularly.
+models query this table daily.
 
 ### Partition pruning
 
@@ -378,14 +492,26 @@ If a second date is ever added for range support, this should switch to
 `--start` / `--end`: with two positionals, `2026-08-01 2026-08-07` requires the
 reader to remember which position is which, and a reversed range returns an
 empty DataFrame rather than an error — a silent failure that format validation
-cannot catch. The season backfill sidesteps this by driving the existing
-single-date interface from a shell loop rather than widening it.
+cannot catch. The backfill sidesteps this by driving the existing single-date
+interface from a shell loop rather than widening it.
+
+### Exit codes as a contract
+
+`ingest_statcast.py` exits `0` on success, `3` when no games were scheduled, and
+`1` on anything else. The distinction exists so callers can tell "nothing to do"
+from "something broke" — the daily run skips `dbt build` and stamps only
+`last_run.txt`, while the backfill marks the date done rather than failed.
+
+Worth noting as a coupling: changing an exit-code contract changes every caller.
+Introducing `3` required editing `backfill.sh`, which had been treating any
+non-zero code as failure and would have logged every off-day as an error.
 
 ### Empty-day behavior
 
 Off-days, the All-Star break, and full rainouts return a `(0, 0)` DataFrame.
-The script now detects this before the single-date invariant check, prints
-`no games, nothing to load`, and exits 0 — so a backfill loop continues past it.
+The script detects this before the single-date invariant check, prints
+`no games, nothing to load`, and exits 3 — so a backfill loop continues past it
+and the daily run no-ops.
 
 This was not free. The original invariant guard asserted exactly one distinct
 `game_date` in the pull, which raises on zero rows; combined with a `|| break`
@@ -397,7 +523,7 @@ bug.
 **The honest limitation:** a genuine off-day and a silently failed pull both
 produce zero rows, and nothing in the data distinguishes them. The backfill loop
 therefore logs every skip, and the expected skip count is known in advance — 3
-for the 2026 season. A larger skipped set means something went wrong.
+for the 2026 regular season. A larger skipped set means something went wrong.
 
 ### Grain of the source: not one row per pitch
 
@@ -458,11 +584,18 @@ rather than `PLATE_X` alone. The test was renamed because the old filename named
 the claim the season disproved, and dbt uses filenames as test names in every run
 log.
 
-### Takes filter: `ball` and `called_strike`, with complete tracking
+**That severity choice is now load-bearing.** Under `dbt build`, tests run
+between the models that depend on them, so an error-severity failure on staging
+would skip `FCT_TAKES` entirely — the mart would never be produced, every day,
+forever. Choosing `warn` began as a judgment about test philosophy and has become
+a pipeline dependency. Anyone raising it back to `error` months from now would
+silently stop the warehouse.
+
+### Takes filter: `ball` and `called_strike`, regular season, complete tracking
 
 A take is a pitch the batter did not swing at **and** on which the umpire made a
 judgment about location. That second clause does the work, because framing only
-exists where an umpire had a call to make. Across the 2026 season:
+exists where an umpire had a call to make. Across the 2026 regular season:
 
 | excluded | N | why |
 |---|---|---|
@@ -483,12 +616,21 @@ kind: an automatic strike on a pitch-clock violation is a strike the catcher had
 no part in, and including it would credit or debit a catcher for an umpire's
 clock.
 
-**A second filter** removes 192 takes with null location (see *Location nulls*
-above). A pitch with no recorded location cannot be used by a framing model
-regardless, so the only real question was whether the mart declares the exclusion
-or hides it. It is declared here and in the model's own description.
+**Two further filters**, both declared in the model's own description rather than
+implied:
 
-The filter lives in the mart, not staging, for the same reason the location
+- **`game_type = 'R'`.** Postseason umpire crews are selected rather than
+  rotated, leverage differs, and the sample is small; published framing work is
+  conventionally regular-season-only. Spring training is worse still —
+  minor-leaguers, experimental rules, and parks without full tracking. The
+  filter was added while it was still a no-op, which is the only moment it could
+  be verified as one; it did real work the next day, excluding all 598 events
+  from the first playoff game.
+- **Non-null location**, removing 192 takes (see *Location nulls*). A pitch with
+  no recorded location cannot be used by a framing model regardless, so the only
+  real question was whether the mart declares the exclusion or hides it.
+
+All of these live in the mart, not staging, for the same reason the location
 assertions do: staging keeps every row the source has, including broken ones,
 because its job is faithful representation. The mart is the layer entitled to say
 "these rows are unusable for my purpose."
@@ -504,9 +646,9 @@ layer whose job is faithful representation.
 
 **The mart is a table.** Three reasons, in order of weight:
 
-1. **The work runs once.** The takes filter and the normalized-location
-   derivation execute at build time instead of on every downstream read. A
-   framing model will scan this table repeatedly during training and evaluation.
+1. **The work runs once.** The filters and the normalized-location derivation
+   execute at build time instead of on every downstream read. A framing model
+   will scan this table repeatedly during training and evaluation.
 2. **Consistency across consumers.** A materialized table means a training run
    and a dashboard reading at different moments see byte-identical derived
    values. A view recomputes, so if raw or staging changed between two reads,
@@ -515,9 +657,9 @@ layer whose job is faithful representation.
    on `CATCHER_ID` — neither is possible for a view, and both matter for a
    workload whose every query groups by catcher and filters by date.
 
-The trade-off is that the mart is stale until the next `dbt run`. For a
-warehouse fed by a daily batch ingest, staleness is bounded by the ingest
-cadence anyway, so a view would buy no real freshness.
+The trade-off is that the mart is stale until the next `dbt build`. With a daily
+scheduled run, staleness is bounded by the ingest cadence anyway, so a view would
+buy no real freshness.
 
 ### Mart derivations
 
@@ -560,10 +702,10 @@ staging model can select `GAME_DATE` from a raw table whose column is
 `game_date`. The dbt project name itself stays lowercase because dbt requires
 it; it is not a BigQuery object.
 
-Raw-layer column names stay as Savant delivers them, lowercase, because
-renaming them in the raw zone would be exactly the kind of editorializing that
-layer is supposed to avoid. Uppercase begins at staging, which is the layer
-entitled to hold naming opinions.
+Raw-layer column names stay as Savant delivers them, lowercase, because renaming
+them in the raw zone would be exactly the kind of editorializing that layer is
+supposed to avoid. Uppercase begins at staging, which is the layer entitled to
+hold naming opinions.
 
 ### What a full season changed about a one-week sample
 
@@ -581,10 +723,12 @@ asserting a closed vocabulary on a long-tailed categorical is the wrong shape of
 test, not because the assertion was inconvenient. The second was rewritten to
 express the contract that is actually true.
 
-The general lesson, worth stating because it will recur: a test written against
-a sample encodes that sample's accidents as if they were rules. The tests were
-still worth writing — they are what *caught* both errors — but a passing test on
-seven days is evidence about seven days.
+The general lesson, worth stating because it kept recurring: a test written
+against a sample encodes that sample's accidents as if they were rules. The
+tests were still worth writing — they are what *caught* both errors — but a
+passing test on seven days is evidence about seven days. The all-null-column
+schema drift was the same lesson again, from a different direction: 184 days of
+full slates had never produced an empty column, and the first small day did.
 
 ---
 
@@ -610,17 +754,24 @@ who work them.
 ## Repository hygiene
 
 `.gitignore` covers `output/`, `*.parquet`, `*.csv`, `venv/`, `__pycache__/`,
-`logs/`, `target/`, and the backfill bookkeeping files (`dates.txt`,
-`backfill_*.txt`, `backfill_run.log`). Data belongs in GCS, never in the repo —
-`output/` covers the location and `*.parquet` covers the mistake of writing
-somewhere else. One pattern per line, no delimiters: git treats each line
-literally, so a trailing comma makes a rule match only filenames ending in a
-comma.
+`logs/`, `target/`, the backfill bookkeeping files (`dates.txt`,
+`backfill_*.txt`, `backfill_run.log`) and the heartbeat stamps
+(`last_run.txt`, `last_data_loaded.txt`). Data belongs in GCS, never in the
+repo — `output/` covers the location and `*.parquet` covers the mistake of
+writing somewhere else.
 
-`packages.yml` and `package-lock.yml` are tracked; `dbt_packages/` is not —
-the same relationship as `requirements.txt` to `venv/`. The lock file pins the
-resolved dbt_utils version so a fresh `dbt deps` cannot drift within the
-version range.
+One pattern per line, no delimiters: git treats each line literally, so a
+trailing comma makes a rule match only filenames ending in a comma. A missing
+final newline is just as bad — appending with `>>` to a file that lacks one
+glues the first new pattern onto the last old one, producing a single dead rule.
+`git check-ignore -v <path>` reports which pattern matched a path, and is the
+right way to verify: it asks git what git thinks instead of reading the file and
+inferring.
+
+`packages.yml` and `package-lock.yml` are tracked; `dbt_packages/` is not — the
+same relationship as `requirements.txt` to `venv/`. The lock file pins the
+resolved dbt_utils version so a fresh `dbt deps` cannot drift within the version
+range.
 
 **A dbt gotcha worth filing away:** deleting a model file does not drop the
 object it built. The `dbt init` example models were removed from
@@ -639,6 +790,7 @@ object it built. The `dbt init` example models were removed from
 | A3b — staging tests | ✅ |
 | A3c — `FCT_TAKES` mart | ✅ |
 | Full 2026 season backfill | ✅ |
-| A4 — scheduling | not started |
+| A4 — daily scheduling | ✅ |
+| **Layer 1 complete** | |
 | Layer 2 — Tableau | not started |
 | Layer 3 — framing model | not started |
