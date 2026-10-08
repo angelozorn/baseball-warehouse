@@ -5,3 +5,8 @@ output/
 *.parquet
 logs/
 target/
+dates.txt
+backfill_done.txt
+backfill_failed.txt
+backfill_run.log
+.DS_Store
