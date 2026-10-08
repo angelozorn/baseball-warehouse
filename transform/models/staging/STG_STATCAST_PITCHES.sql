@@ -1,5 +1,6 @@
 SELECT
     CAST(GAME_DATE AS DATE)             AS GAME_DATE,
+    GAME_TYPE,
     FIELDER_2                           AS CATCHER_ID,
     PITCHER                             AS PITCHER_ID,
     BATTER                              AS BATTER_ID,

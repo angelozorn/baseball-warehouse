@@ -13,6 +13,14 @@ models:
     columns:
       - name: GAME_DATE
         data_tests: [not_null]
+      - name: GAME_TYPE
+        data_tests:
+          - not_null
+          - accepted_values:
+              config:
+                severity: warn
+              arguments:
+                values: ['R', 'F', 'D', 'L', 'W', 'S', 'E', 'A']
       - name: GAME_PK
         data_tests: [not_null]
       - name: CATCHER_ID

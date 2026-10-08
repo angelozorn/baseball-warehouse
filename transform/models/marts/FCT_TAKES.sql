@@ -8,7 +8,8 @@ WITH TAKES AS (
 
     SELECT *
     FROM {{ ref('STG_STATCAST_PITCHES') }}
-    WHERE DESCRIPTION IN ('ball', 'called_strike')
+    WHERE GAME_TYPE = 'R'
+      AND DESCRIPTION IN ('ball', 'called_strike')
       AND PLATE_X IS NOT NULL
       AND PLATE_Z IS NOT NULL
       AND SZ_TOP  IS NOT NULL
@@ -18,6 +19,7 @@ WITH TAKES AS (
 
 SELECT
     -- grain
+    GAME_TYPE,
     GAME_PK,
     AT_BAT_NUMBER,
     PITCH_NUMBER,
