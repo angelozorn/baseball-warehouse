@@ -66,8 +66,15 @@ than incidental.
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt          # curated top-level dependencies
+# or, to reproduce an exact environment:
+# pip install -r requirements-lock.txt
 ```
+
+`requirements.txt` lists only what this project imports directly;
+`requirements-lock.txt` is a full `pip freeze` snapshot for exact reproduction.
+The curated file is the one to edit when a dependency is added — the lock is
+regenerated from a working environment, never hand-written.
 
 Google Cloud authentication:
 
@@ -151,14 +158,34 @@ dbt build
 A launchd agent (`com.angelozorn.statcast-daily`) runs `run_daily.sh` at 06:37
 daily: ingest the previous day's games, then `dbt build`.
 
+### Installing the agent
+
+The agent definition is committed at
+`scheduler/com.angelozorn.statcast-daily.plist` so the scheduler can be rebuilt
+from a clone. Its paths are absolute — launchd does not expand `~` — so the
+install rewrites them for wherever the repo actually lives:
+
 ```bash
+mkdir -p logs
+sed "s|/Users/angelozorn/baseball-warehouse|$PWD|g" scheduler/com.angelozorn.statcast-daily.plist \
+  > ~/Library/LaunchAgents/com.angelozorn.statcast-daily.plist
+launchctl bootout gui/$(id -u)/com.angelozorn.statcast-daily 2>/dev/null || true
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.angelozorn.statcast-daily.plist
 launchctl kickstart -k gui/$(id -u)/com.angelozorn.statcast-daily   # fire now
 launchctl list | grep statcast                                      # PID, last exit status
 ```
 
-launchd ignores edits to a loaded job, so any plist change needs `bootout` then
-`bootstrap` again.
+Three details that are each a failed install otherwise:
+
+- **`mkdir -p logs` comes first.** launchd opens `StandardErrorPath` before the
+  script runs, and `logs/` is gitignored — `run_daily.sh` creating the directory
+  happens too late.
+- **The `bootout` with `|| true`** makes the block idempotent. launchd refuses to
+  bootstrap a label that is already loaded (`Bootstrap failed: 5: Input/output
+  error`), and it ignores edits to a loaded job, so every reinstall needs an
+  unload first. `|| true` keeps that harmless on a first install.
+- **`plutil -lint` the result** if bootstrap fails for any other reason; a
+  malformed plist produces the same unhelpful error as an already-loaded one.
 
 ### Why launchd rather than cron
 
@@ -181,6 +208,10 @@ correct. In season, a widening gap between them is the alarm.
 A failure writes neither. `set -Eeuo pipefail` means the stamps are unreachable
 unless everything above them succeeded, so a heartbeat cannot lie by being
 written on a partial run.
+
+Both files are gitignored. They are runtime state written by the scheduler every
+morning; tracking them would make the repository dirty daily, forever, with
+churn that carries no information.
 
 ### Failure visibility
 
@@ -753,12 +784,14 @@ who work them.
 
 ## Repository hygiene
 
-`.gitignore` covers `output/`, `*.parquet`, `*.csv`, `venv/`, `__pycache__/`,
-`logs/`, `target/`, the backfill bookkeeping files (`dates.txt`,
-`backfill_*.txt`, `backfill_run.log`) and the heartbeat stamps
-(`last_run.txt`, `last_data_loaded.txt`). Data belongs in GCS, never in the
-repo — `output/` covers the location and `*.parquet` covers the mistake of
-writing somewhere else.
+Everything that a run produces is ignored: `output/`, `*.parquet`, `*.csv`,
+`venv/`, `__pycache__/`, `logs/`, `target/`, the backfill ledgers (`dates.txt`,
+`backfill_*.txt`, `backfill_run.log`) and the heartbeat stamps (`last_run.txt`,
+`last_data_loaded.txt`). Data belongs in GCS, never in the repo — `output/`
+covers the location and `*.parquet` covers the mistake of writing somewhere
+else. The heartbeats are the same ruling applied to the scheduler: runtime state
+the agent rewrites every morning would otherwise make the repository dirty
+daily, forever, with churn that carries no information.
 
 One pattern per line, no delimiters: git treats each line literally, so a
 trailing comma makes a rule match only filenames ending in a comma. A missing
@@ -772,6 +805,12 @@ inferring.
 same relationship as `requirements.txt` to `venv/`. The lock file pins the
 resolved dbt_utils version so a fresh `dbt deps` cannot drift within the version
 range.
+
+**What must be committed to rebuild from a clone:** the ingest script, the two
+shell scripts, the dbt project, and `scheduler/`. The launchd plist is the one
+piece of the pipeline that otherwise exists only on one machine — the test is
+whether someone with a fresh clone can rebuild the scheduler, and without the
+committed copy the answer is no.
 
 **A dbt gotcha worth filing away:** deleting a model file does not drop the
 object it built. The `dbt init` example models were removed from

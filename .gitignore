@@ -10,3 +10,5 @@ backfill_done.txt
 backfill_failed.txt
 backfill_run.log
 .DS_Store
+last_run.txt
+last_data_loaded.txt
