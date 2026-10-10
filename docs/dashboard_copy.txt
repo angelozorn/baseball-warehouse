@@ -72,6 +72,30 @@ The residual slope against staff quality on the panel above points the same way:
 Both findings specify what the next version needs: a smooth model over location with pitcher effects, replacing bins that average away the exact margin framing works in.
 On tone. Resist softening this into "results were inconclusive." The point is not that the analysis failed — it is that the analysis produced a number and then produced the arithmetic showing that number cannot support the conclusion a reader would otherwise draw from it. That is the finding.
 
+Why ABS challenge data isn't used
+2026 is the first MLB season with ABS challenges, and an overturned called
+strike is ground truth on framing: the pitch was objectively a ball and the
+catcher got it called a strike. That is a better measurement than any
+expected-strike baseline, and it was the first thing checked.
+
+The `statcast_search` export carries no challenge field. Challenge outcomes do
+appear, but only as unstructured text in `des` — the plate-appearance
+description — which means only challenges on the *terminal* pitch of an at-bat
+are visible at all.
+
+That subset cannot be used, and not merely because it is small. A **confirmed**
+challenge ends the at-bat only when the pitch was strike three; an
+**overturned** challenge ends it only when the pitch was ball four. The two
+outcomes therefore enter the visible data under different conditions, so any
+overturn rate computed from it is biased in a direction that depends on the
+thing being measured. The sample is unusable rather than merely thin.
+
+Pitch-level challenge data exists on Baseball Savant's ABS dashboard, which is
+a separate surface requiring its own ingest path. That is the single highest-value
+addition to this project: ~10,500 adjudicated pitches are both a direct measure
+of stolen strikes and a labeled validation set for the binned expected-strike
+baseline used here, which currently has no ground truth at all.
+
 About this project (Tableau Public description)
 Catcher framing, 2026 MLB regular season
 Every taken pitch of the season — 356,498 across 184 game days — pulled from Statcast and run through a pipeline I built end to end: a Python ingest with round-trip verification, Parquet landed in Google Cloud Storage, partitioned loads into BigQuery with atomic re-run semantics, dbt models with 27 tests, and a scheduled daily refresh.

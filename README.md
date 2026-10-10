@@ -1014,6 +1014,31 @@ discrete because a clean tiled surface matters more there.
 viewer's browser window, which is wide, and the zone squashes again. A
 fixed-size dashboard scales proportionally and holds its aspect on any screen.
 
+### Why ABS challenge data isn't used
+
+2026 is the first MLB season with ABS challenges, and an overturned called
+strike is ground truth on framing: the pitch was objectively a ball and the
+catcher got it called a strike. That is a better measurement than any
+expected-strike baseline, and it was the first thing checked.
+
+The `statcast_search` export carries no challenge field. Challenge outcomes do
+appear, but only as unstructured text in `des` — the plate-appearance
+description — which means only challenges on the *terminal* pitch of an at-bat
+are visible at all.
+
+That subset cannot be used, and not merely because it is small. A **confirmed**
+challenge ends the at-bat only when the pitch was strike three; an
+**overturned** challenge ends it only when the pitch was ball four. The two
+outcomes therefore enter the visible data under different conditions, so any
+overturn rate computed from it is biased in a direction that depends on the
+thing being measured. The sample is unusable rather than merely thin.
+
+Pitch-level challenge data exists on Baseball Savant's ABS dashboard, which is
+a separate surface requiring its own ingest path. That is the single highest-value
+addition to this project: ~10,500 adjudicated pitches are both a direct measure
+of stolen strikes and a labeled validation set for the binned expected-strike
+baseline used here, which currently has no ground truth at all.
+
 ---
 
 ## Exploratory findings
