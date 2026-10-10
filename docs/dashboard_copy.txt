@@ -1,0 +1,105 @@
+Catcher Framing, 2026ß
+
+Abstract:
+The strike zone is not a rectangle — and the numbers can't tell catchers apart.
+Standfirst (one text object directly under the title)
+Every taken pitch of the 2026 MLB regular season: 356,498 pitches across 184 game days, from Statcast. Where umpires actually call strikes, which catchers appear to earn the most, and why — once you control for where their pitchers were throwing — almost none of that difference survives.
+That's the 30-second read. A viewer who stops there should leave with the argument intact.
+
+View 1 — The empirical strike zone
+Title
+The called zone is a baseball wider than the plate
+Caption
+Called-strike rate on taken pitches, by location. The box marks the rulebook zone: home plate's 17 inches wide, and the league-average vertical bounds (1.62–3.21 ft) measured from this data. The dashed lines sit a baseball's radius outside the plate edge.
+Strikes are called well past the plate — and the boundary lands almost exactly on the dashed lines. That isn't umpires being generous. A pitch is a strike if any part of the ball crosses the zone, so the true boundary is the plate edge plus 1.45 inches. The naive rectangle was the wrong rectangle.
+The band where the call is a coin flip is narrower than the "fuzzy edge" framing suggests. Everything a catcher can influence happens inside it.
+Tooltip wording
+Location: {X} ft from center, {Z} ft high Called strikes: {rate} of {n} taken pitches
+
+View 2 — Raw rates by catcher
+Title
+Called strike rate on takes, by catcher
+Caption
+Catchers with at least 3,000 taken pitches in 2026, sorted by the share of called strikes. Dot size shows sample. The line is league average, 32.4%.
+The spread runs 34.2% to 30.4% — 3.8 percentage points, or roughly 200 extra called strikes across a season.
+This is not a framing leaderboard. A catcher receiving pitchers with better command collects more strikes without doing anything. The next panels test that — and then test whether anything survives it.
+Naming the confound here, before the viewer forms a conclusion, is the point. A reader who takes this chart at face value and is corrected two panels later has already been misled once.
+
+View 3 — The zone by count
+Title
+The zone changes shape with the count
+Caption
+Called-strike rate by location, split by who's ahead. Hitter's counts (1-0, 2-0, 3-0, 2-1, 3-1) hold 82,536 takes; even counts (0-0, 1-1, 3-2) hold 161,855; pitcher's counts (0-1, 0-2, 1-2, 2-2) hold 112,107. 3-2 counts as even by convention rather than by a mechanical balls-vs-strikes rule.
+The zone expands when the hitter is ahead because the hitter is more willing to take a close pitch. When the hitter is ahead, they are hunting a pitch in the middle of the zone.
+Specific counts were abandoned for grouped ones: 3-0 holds only 6,999 takes, about 17 per location bin, which is too thin to read.
+
+View 4 — Framing, location-controlled
+Title
+Called strikes above expected, by location
+Caption
+For each location bin, the league called-strike rate in that bin is the expected probability — a pitch down the middle carries an expectation near 0.98, one six inches outside near 0.05. Red means a catcher got more strikes than the location deserved; blue, fewer. Pitcher command largely cancels out, because meeting expectation earns no credit.
+Individual cells are within sampling noise. At roughly 50 pitches per cell for one catcher-season, the standard error on a cell is about 7 percentage points. Read the broad pattern, not single squares — and note that framing can only operate at the edges, where the call was in doubt. Color in the middle of the zone is noise.
+
+View 5 — Staff vs skill
+Title
+The hand they were dealt vs what they did with it
+Caption
+Horizontal: expected called-strike rate, effectively an index of how well that catcher's pitchers located. Vertical: called strikes above expected across the season. Each dot is a qualified catcher.
+The relationship is negative and significant — slope −1,328, p = 0.011, R² = 0.11. Catchers with better-locating staffs post lower strikes above expected, by about 56 strikes across the observed range.
+That is the opposite of what an umpire "rhythm" effect would predict, and it means location control is incomplete. Three explanations fit and this data cannot separate them: sequential effects in umpire calls (published work finds umpires are less likely to call a strike right after calling one); within-bin pitch placement (good-command pitchers aim at the edge, so their pitches inside an edge bin sit toward the outside, below the bin's average); and roster construction (teams with elite pitching can afford a bat-first catcher).
+
+The three catchers — a text object worth its space
+Title
+What the control actually did
+Body
+	raw rate	raw rank	expected rate	strikes above expected
+William Contreras	.3428	1st of 54	.3456 — highest	−24.5
+Patrick Bailey	.3306	14th	.3270 — average	+24.4
+Jonah Heim	.3042	last	.3044 — lowest	−0.9
+Contreras led the league in called-strike rate and catches Milwaukee's staff, whose locations rank first of 54. Heim ranked last and catches Oakland's, which rank last. Once location is accounted for, both land at average — the raw ranking was measuring their pitchers.
+Bailey is the test case: widely regarded as the best receiver in baseball, 14th on raw rate, positive once controlled — but at 0.63 standard deviations, not distinguishable from zero.
+Build this as a worksheet (catcher names on Rows, measures on Text), not as typed text — Tableau text objects can't render tables, and a hand-spaced one looks hand-spaced.
+
+The precision panel — the most important text on the dashboard
+Place this immediately after the three-catcher table. It is the conclusion the rest of the dashboard earns.
+Title
+The measurement isn't precise enough to rank catchers
+Body
+Across 54 qualified catchers, the observed spread in strikes above expected is 33.5. The spread you would expect from chance alone, given how many pitches each catcher received, is 33.9.
+They are the same number. Subtracting one variance from the other leaves nothing — the estimated true difference between catchers is zero. Every apparent gap in the leaderboard above, from +69 to −64, is consistent with 54 draws from a distribution centred on zero.
+This is a statement about the method, not about framing. Published metrics do find consistent, repeatable differences between catchers across seasons. The approach here — 0.25-ft location bins, with no adjustment for count, handedness, pitch type or pitcher — is too coarse to resolve an effect that operates at the scale of inches.
+The residual slope against staff quality on the panel above points the same way: this metric is partly measuring where pitchers throw within a bin, not how catchers receive. Two independent lines of evidence, one conclusion.
+Both findings specify what the next version needs: a smooth model over location with pitcher effects, replacing bins that average away the exact margin framing works in.
+On tone. Resist softening this into "results were inconclusive." The point is not that the analysis failed — it is that the analysis produced a number and then produced the arithmetic showing that number cannot support the conclusion a reader would otherwise draw from it. That is the finding.
+
+About this project (Tableau Public description)
+Catcher framing, 2026 MLB regular season
+Every taken pitch of the season — 356,498 across 184 game days — pulled from Statcast and run through a pipeline I built end to end: a Python ingest with round-trip verification, Parquet landed in Google Cloud Storage, partitioned loads into BigQuery with atomic re-run semantics, dbt models with 27 tests, and a scheduled daily refresh.
+The question: can you see catcher framing in public data, and can you separate it from the quality of the pitching staff?
+The strike zone itself is visibly not the rulebook rectangle — it's a baseball's radius wider, which turns out to be the rule working correctly rather than umpires erring. Raw called-strike rate ranks catchers in an order that mostly reflects their pitchers: the league leader catches the staff with the best locations in baseball, the last-place catcher the worst, and both move to average once location is controlled.
+And then the answer to the second question is no — at least not this way. The spread between catchers after controlling for location is 33.5 strikes; the spread expected from chance alone is 33.9. The method can't tell them apart, and the dashboard shows the arithmetic rather than the ranking.
+Code, data pipeline and full methodology: github.com/angelozorn/baseball-warehouse
+Swap in your actual repo URL. Tableau Public descriptions don't render markdown, so flatten the formatting when you paste.
+
+Method and limitations (a text object, or the second half of the description)
+How expected strikes are computed. Every taken pitch is assigned to a 0.25-ft location bin. The league called-strike rate within that bin is the expected probability. A catcher's "strikes above expected" is the sum of actual strikes minus the sum of expectations across all their takes. The baseline is computed in the warehouse as a tested dbt model, not in Tableau.
+Vertical location is normalized per batter. The strike zone's top and bottom are set by each hitter's stance, so a pitch at 2.5 feet is a strike to one batter and a ball to another. Heights are expressed relative to each batter's own zone, then rescaled onto the league-average zone (1.62–3.21 ft) so the axis reads in feet.
+What's included. Regular season only. Taken pitches only — balls and called strikes. Excluded: swings, bunts, hit-by-pitch, pitchouts, blocked balls (the pitch bounced; the catcher was blocking, not framing), automatic ball and strike rulings (no pitch was thrown), and 192 pitches with no recorded location.
+Three limitations, in order of size.
+The method cannot distinguish catchers at one season. Observed spread 33.5 strikes, chance-alone spread 33.9. See the precision panel.
+Binning attenuates. A 0.25-ft bin at the zone edge contains pitches whose true strike probability ranges from about 0.2 to 0.8. Averaging across that gradient discards exactly the margin framing operates in — and introduces a measurable bias, visible as the negative slope against staff quality.
+No other covariates. Count, handedness and pitch type all shift the called zone and aren't conditioned on here.
+All three point the same direction: replace bins with a model. Logistic regression or a GAM over location, handedness, count and pitcher pools information across neighbouring locations instead of treating each cell as an independent sample, and a pitcher term would absorb the within-bin placement effect directly. That's the next phase.
+
+Reading order on the dashboard
+Top to bottom, the argument is:
+1. The zone isn't what you think (view 1) — the hook, needs no explanation
+2. Here's who leads (view 2) — with the confound named immediately
+3. That list was mostly pitching staffs (the three-catcher table) — the reversal
+4. And the metric can't tell catchers apart at all (precision panel) — the conclusion
+5. Where it happens on the plate (view 4) and the count effect (view 3) — exploration for anyone still reading
+Views 1, 2, the three-catcher table and the precision panel carry the argument. A viewer who only sees the top half should still get the whole claim.
+A dashboard whose later panels dismantle its earlier ones, deliberately and with the arithmetic shown, is a stronger artifact than one where every panel agrees.
+
+A maintenance note
+R², p-values and the two standard deviations are typed into captions by hand — Tableau doesn't expose them as fields. If the underlying data changes, those figures go stale silently. Anything here that is a number rather than a statement should be re-checked whenever the extract is refreshed.
