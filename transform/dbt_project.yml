@@ -33,3 +33,7 @@ models:
   transform:
     +materialized: view
     
+vars:
+  expected_bin_size: 0.25
+  zone_bot: 1.62
+  zone_top: 3.21

@@ -1,0 +1,14 @@
+version: 2
+
+models:
+  - name: FCT_TAKES_EXPECTED
+    description: >
+      FCT_TAKES with an empirical expected-strike probability per pitch, taken
+      from the league called-strike rate in that location bin. Bin size is set
+      by the expected_bin_size var. This is a binned baseline, not a model —
+      see the README on why Layer 3 replaces it.
+    columns:
+      - name: EXPECTED_CS
+        data_tests: [not_null]
+      - name: CS_ABOVE_EXPECTED
+        data_tests: [not_null]

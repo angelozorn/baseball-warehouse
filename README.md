@@ -1,18 +1,20 @@
 # baseball-warehouse
 
-Pitch-level Statcast ingestion into BigQuery, transformed with dbt into a
-modeling-ready fact table of taken pitches, on a daily schedule.
+Pitch-level Statcast ingestion into BigQuery, transformed with dbt into
+modeling-ready fact tables of taken pitches, on a daily schedule, with a
+Tableau Public dashboard on top.
 
 `ingest_statcast.py` pulls a single day of Statcast data from Baseball Savant,
 writes it to a partitioned local Parquet file, verifies the write round-trips,
 uploads it to GCS, and loads it into BigQuery — replacing that day's partition
 atomically so re-runs are safe. dbt then cleans that raw table into a staging
-view and filters it into `FCT_TAKES`, the fact table a catcher-framing model
-reads. A launchd agent runs the whole chain every morning.
+view, filters it into `FCT_TAKES`, and attaches a location-based
+expected-strike baseline in `FCT_TAKES_EXPECTED`. A launchd agent runs the
+whole chain every morning.
 
 The warehouse holds the full 2026 regular season: 184 game days, 716,792
 events, 356,498 takes — plus postseason games as they are played, which staging
-keeps and the mart excludes.
+keeps and the marts exclude.
 
 ---
 
@@ -42,6 +44,15 @@ Baseball Savant  ──(pybaseball)──▶  pandas DataFrame
                                         ref()
                                           ▼
               DBT_DEV.FCT_TAKES                     (table — regular-season takes)
+                                   │             │
+                                 ref()         ref()
+                                   ▼             ▼
+       INT_EXPECTED_STRIKE_BY_BIN  ────▶  FCT_TAKES_EXPECTED
+       (league rate per location)         (takes + expected strike probability)
+                                                  │
+                                            CSV extract
+                                                  ▼
+                                         Tableau Public dashboard
 ```
 
 Every ingest layer derives its path from a single function, `partition_tail(date)`,
@@ -49,10 +60,9 @@ which returns `dt=<date>/statcast.parquet`. The local writer, the GCS uploader,
 and the BigQuery loader all build on that one string. Path drift between stages
 is a classic silent pipeline bug — one source of truth prevents it.
 
-Inside dbt, `{{ ref() }}` plays the same role: `FCT_TAKES` names
-`STG_STATCAST_PITCHES` rather than a hardcoded dataset, so dbt derives the build
-order from the SQL and the whole DAG retargets by changing one line in
-`profiles.yml`.
+Inside dbt, `{{ ref() }}` plays the same role: each model names its upstream
+rather than a hardcoded dataset, so dbt derives the build order from the SQL and
+the whole DAG retargets by changing one line in `profiles.yml`.
 
 **Region note:** the GCS bucket, both BigQuery datasets, and the dbt profile are
 all `us-west1`. BigQuery cannot load from a bucket in a different location, and
@@ -150,6 +160,23 @@ re-run.
 cd transform
 dbt build
 ```
+
+### Extract for Tableau
+
+Tableau Public cannot connect to BigQuery (see *Tableau Public constraints*),
+so the dashboard is fed by a CSV extract:
+
+```bash
+bq extract --destination_format=CSV \
+  'mlb-catcher-framing:DBT_DEV.FCT_TAKES_EXPECTED' \
+  'gs://mlb-catcher-framing/exports/fct_takes_expected.csv'
+
+gcloud storage cp 'gs://mlb-catcher-framing/exports/fct_takes_expected.csv' tableau/
+```
+
+Catcher names are not in the warehouse; `tableau/catchers.csv` maps MLBAM IDs to
+names via `pybaseball.playerid_reverse_lookup` and is joined in Tableau. That
+mapping belongs in dbt as a seed eventually.
 
 ---
 
@@ -252,10 +279,10 @@ immediately rather than left to fire at 06:37.
 
 ### Test suite
 
-`dbt build` runs 23 data tests — 10 on staging, 13 on the mart — interleaved
-with the models so a model whose tests fail is not used downstream. All pass
-except `ASSERT_UNEXPLAINED_NULL_LOCATION_RATE`, which warns with 369 rows by
-design: the tracking-failure rate is reported rather than suppressed.
+`dbt build` runs 27 data tests across 4 models, interleaved with the models so a
+model whose tests fail is not used downstream. All pass except
+`ASSERT_UNEXPLAINED_NULL_LOCATION_RATE`, which warns with 369 rows by design:
+the tracking-failure rate is reported rather than suppressed.
 
 ### Season coverage
 
@@ -362,8 +389,23 @@ rulings are excluded from both sides of the ratio, because with no pitch thrown
 neither a take nor a swing was possible.
 
 Note that this query is run against a live table: once postseason games land in
-raw, `THROWN_PITCHES` grows while `TAKES` does not, because the mart is
+raw, `THROWN_PITCHES` grows while `TAKES` does not, because the marts are
 restricted to `game_type = 'R'`.
+
+### Expected-strike reconciliation
+
+```sql
+SELECT ROUND(AVG(EXPECTED_CS), 4) AS expected_rate,
+       ROUND(AVG(CAST(IS_CALLED_STRIKE AS INT64)), 4) AS actual_rate,
+       COUNT(*) AS rows
+FROM `mlb-catcher-framing.DBT_DEV.FCT_TAKES_EXPECTED`;
+```
+
+Both rates must equal **0.3244** and rows must equal **356,498**. Every pitch's
+expectation is its own location bin's mean, so the row-weighted average of
+`EXPECTED_CS` equals the actual called-strike rate by construction. This is
+asserted on every build by `ASSERT_EXPECTED_RECONCILES` — see *Where the
+expected-strike baseline lives* for why that test exists.
 
 ---
 
@@ -485,9 +527,10 @@ WHERE DATE(game_date) = '2026-08-01'
 ```
 
 This is what makes `require_partition_filter` worth revisiting: it converts a
-forgotten filter from a silent full scan into an error. `FCT_TAKES` is itself
-partitioned on `GAME_DATE`, so the same pruning holds at the mart layer, where
-the staging view's `CAST` would otherwise leave it to the optimizer.
+forgotten filter from a silent full scan into an error. `FCT_TAKES` and
+`FCT_TAKES_EXPECTED` are both partitioned on `GAME_DATE`, so the same pruning
+holds at the mart layer, where the staging view's `CAST` would otherwise leave
+it to the optimizer.
 
 ### GCS overwrite semantics
 
@@ -617,10 +660,10 @@ log.
 
 **That severity choice is now load-bearing.** Under `dbt build`, tests run
 between the models that depend on them, so an error-severity failure on staging
-would skip `FCT_TAKES` entirely — the mart would never be produced, every day,
-forever. Choosing `warn` began as a judgment about test philosophy and has become
-a pipeline dependency. Anyone raising it back to `error` months from now would
-silently stop the warehouse.
+would skip every downstream model — the marts would never be produced, every
+day, forever. Choosing `warn` began as a judgment about test philosophy and has
+become a pipeline dependency. Anyone raising it back to `error` months from now
+would silently stop the warehouse.
 
 ### Takes filter: `ball` and `called_strike`, regular season, complete tracking
 
@@ -661,12 +704,12 @@ implied:
   no recorded location cannot be used by a framing model regardless, so the only
   real question was whether the mart declares the exclusion or hides it.
 
-All of these live in the mart, not staging, for the same reason the location
+All of these live in the marts, not staging, for the same reason the location
 assertions do: staging keeps every row the source has, including broken ones,
 because its job is faithful representation. The mart is the layer entitled to say
 "these rows are unusable for my purpose."
 
-### Why staging is a view and the mart is a table
+### Why staging is a view and the marts are tables
 
 **Staging is a view.** It is a thin projection over raw — a cast, some renames,
 a column selection, no aggregation and no filter. Materializing it would
@@ -675,22 +718,22 @@ for savings on a query that is nearly free to recompute. A view is also always
 consistent with whatever raw currently holds, which is the right default for a
 layer whose job is faithful representation.
 
-**The mart is a table.** Three reasons, in order of weight:
+**The marts are tables.** Three reasons, in order of weight:
 
-1. **The work runs once.** The filters and the normalized-location derivation
-   execute at build time instead of on every downstream read. A framing model
-   will scan this table repeatedly during training and evaluation.
-2. **Consistency across consumers.** A materialized table means a training run
-   and a dashboard reading at different moments see byte-identical derived
-   values. A view recomputes, so if raw or staging changed between two reads,
-   two consumers could silently disagree about the same "pitch."
-3. **Physical layout.** `FCT_TAKES` is partitioned on `GAME_DATE` and clustered
+1. **The work runs once.** The filters, the normalized-location derivation and
+   the expected-strike join execute at build time instead of on every downstream
+   read. A framing model will scan these tables repeatedly.
+2. **Consistency across consumers.** A materialized table means a training run,
+   a dashboard extract and an ad-hoc query see byte-identical derived values. A
+   view recomputes, so if raw or staging changed between two reads, two
+   consumers could silently disagree about the same "pitch."
+3. **Physical layout.** Both marts are partitioned on `GAME_DATE` and clustered
    on `CATCHER_ID` — neither is possible for a view, and both matter for a
    workload whose every query groups by catcher and filters by date.
 
-The trade-off is that the mart is stale until the next `dbt build`. With a daily
-scheduled run, staleness is bounded by the ingest cadence anyway, so a view would
-buy no real freshness.
+The trade-off is that the marts are stale until the next `dbt build`. With a
+daily scheduled run, staleness is bounded by the ingest cadence anyway, so a
+view would buy no real freshness.
 
 ### Mart derivations
 
@@ -718,6 +761,146 @@ encoding.
 `PLATE_X` is already comparable across batters and needs no per-batter scaling.
 Handedness is carried (`BATTER_STANDS`, `PITCHER_THROWS`) so a model can learn
 the inside/outside asymmetry itself rather than having it baked in here.
+
+### The expected-strike baseline
+
+`INT_EXPECTED_STRIKE_BY_BIN` holds the league called-strike rate for each
+location bin; `FCT_TAKES_EXPECTED` attaches that rate to every take as
+`EXPECTED_CS`, plus `CS_ABOVE_EXPECTED` for the per-pitch difference.
+
+The league rate within a bin **is** an empirical expected-strike probability. A
+pitch down the middle carries an expectation near 0.98 and one six inches off
+the plate near 0.05, so meeting expectation earns a catcher no credit and
+pitcher command largely cancels out. That is the entire mechanism.
+
+Three implementation choices worth stating:
+
+**Bin size and the zone constants are dbt vars** (`expected_bin_size`,
+`zone_bot`, `zone_top` in `dbt_project.yml`). They appear in two models, and
+during development the bin size changed four times. One edit beats a hunt.
+
+**Bins are stored as integer indices, not float coordinates.** The join between
+the two models is on `X_BIN_IDX` / `Z_BIN_IDX` rather than on
+`ROUND(x/0.25)*0.25`. Joining floats is only safe when the bin size is exactly
+representable in binary — 0.25 is, 0.1 is not — so an index join is correct at
+any bin size, and changing the var cannot silently break the join.
+
+**The zone constants come from the data**: `AVG(SZ_BOT) = 1.62` and
+`AVG(SZ_TOP) = 3.21`, giving a tracked zone 1.59 ft tall against the plate's
+1.42 ft wide. That ratio of 1.12 means a correctly-proportioned strike zone is
+only slightly taller than wide — noticeably less elongated than textbook
+diagrams suggest, and a real property of Statcast's per-pitch stance estimates.
+
+### Where the expected-strike baseline lives — and why
+
+The baseline was first built as a Tableau `FIXED` LOD. It produced wrong numbers,
+and the way it was wrong is worth recording.
+
+Tableau aggregated the LOD at **bin grain rather than row grain**, so each of the
+~1,028 location bins counted once regardless of how many pitches fell in it. Most
+bins sit far outside the zone with near-zero called-strike rates, and almost no
+pitches land there — so the unweighted mean came out at **0.049** against a true
+league rate of **0.324**. Downstream, `SUM(expected)` contributed 50 instead of
+115,700, and "strikes above expected" silently became the raw strike count.
+
+Nothing errored. The chart rendered. The numbers were simply wrong by a factor
+of six, and the only reason it was caught was that a scatter plot's axis ran
+0.10–0.14 where 0.32 was expected.
+
+The baseline now lives in dbt as a row-level column, computed once, and
+`ASSERT_EXPECTED_RECONCILES` encodes the invariant that caught it:
+
+```sql
+HAVING ABS(AVG(CAST(IS_CALLED_STRIKE AS INT64)) - AVG(EXPECTED_CS)) > 0.0001
+```
+
+Every pitch's expectation is its own bin's mean, so those two averages must be
+equal. They differ only if the weighting is wrong — which is exactly the failure
+mode above.
+
+**The general rule this produced:** transformation logic belongs in the
+warehouse, where it is versioned, tested, and identical for every consumer. The
+BI layer should do arithmetic on columns, not define them. A BI tool's
+aggregation semantics are subtle enough that a wrong answer looks like a right
+one, and nothing in the tool will tell you.
+
+### Why location-controlled still isn't framing
+
+Raw called-strike rate ranks William Contreras first among 54 qualified catchers
+and Jonah Heim last. Both results were suspicious for the same reason: Contreras
+catches Milwaukee's staff and Heim catches Oakland's.
+
+Controlling for location confirms it, in both directions:
+
+| | raw rate | raw rank | expected rate | strikes above expected |
+|---|---|---|---|---|
+| William Contreras | .3428 | **1st of 54** | **.3456** (highest) | −24.5 |
+| Patrick Bailey | .3306 | 14th | .3270 (average) | +24.4 |
+| Jonah Heim | .3042 | **last** | **.3044** (lowest) | −0.9 |
+
+The `expected_rate` column is effectively a pitching-staff command index, and it
+ranks Milwaukee first and Oakland last out of all 54. Contreras's pitchers put
+the ball in the best locations in baseball; Heim's in the worst. Once that is
+accounted for, both land at average.
+
+**Significance, because the headline deserves a bound.** The standard deviation
+on strikes-above-expected is `sqrt(n × 0.32 × 0.68)` — about ±44 strikes for
+Contreras's 8,798 takes and ±34 for Heim's 5,404. So the correct statement is
+"indistinguishable from average," not "below average." Across all 54 catchers,
+the range runs +69 to −64 and almost nothing clears two standard deviations.
+**Controlling for location collapses most of the apparent spread into noise**,
+which is a more interesting result than a leaderboard.
+
+**Location control is still not sufficient**, and the reason determines what
+Layer 3 must contain.
+
+If umpires give pitchers with established command more benefit of the doubt on
+borderline pitches — a reputation effect belonging to the pitcher — the extra
+strikes still accrue to whoever is catching. The expected-strike baseline cannot
+see this, because it conditions only on where the pitch crossed, not on who
+threw it.
+
+There is also published work on sequential effects in umpire calls (Chen,
+Moskowitz & Shue, on the gambler's fallacy) reporting that umpires are *less*
+likely to call a strike immediately after calling one — negative
+autocorrelation, the opposite of a "rhythm" effect. Whether that holds in 2026
+is testable from this data by adding the previous pitch's call as a feature, and
+is on the list.
+
+**Consequence for Layer 3:** the model needs **pitcher effects alongside catcher
+effects**, so the two can be separated rather than assumed apart. A model
+conditioning on location alone would reproduce the same confound in smoother
+form.
+
+### Bins are not a model
+
+The expected-strike baseline is an empirical average within 0.25-ft bins. Three
+limitations follow, and all three are arguments for the next phase rather than
+fixable by finer binning:
+
+**Per-cell noise.** At roughly 50 pitches per cell for a single catcher, the
+standard error on a cell is about 7 percentage points. Individual cells in the
+per-catcher heatmaps are not interpretable; only the broad pattern is.
+
+**Attenuation.** A 0.25-ft bin straddling the zone edge contains pitches whose
+true strike probability ranges from roughly 0.2 to 0.8. Averaging across that
+gradient discards exactly the margin framing operates in. This likely explains
+why the observed spread (+69 to −64 strikes) is narrower than published framing
+estimates, and why Patrick Bailey — the consensus best framer in baseball —
+lands at +0.63 standard deviations rather than clearly positive.
+
+**No other covariates.** Count, handedness and pitch type all shift the called
+zone and are not conditioned on.
+
+Bailey is the most valuable row in the table precisely because there is an
+outside opinion to check against. The method points the right direction and
+cannot resolve the magnitude — a specific, diagnosable shortfall rather than an
+unexplained disagreement.
+
+Layer 3 replaces bins with a smooth model — logistic regression or a GAM over
+location, handedness, count and pitcher — which pools information across
+neighbouring locations instead of treating each cell as an independent sample.
+That is exactly what thin per-catcher data needs.
 
 ### Naming convention: uppercase identifiers
 
@@ -763,6 +946,76 @@ full slates had never produced an empty column, and the first small day did.
 
 ---
 
+## Layer 2 — Tableau Public dashboard
+
+### Tableau Public constraints
+
+Tableau Desktop Public Edition cannot connect to enterprise databases, BigQuery
+included. It reads files and a handful of cloud sources. The dashboard is
+therefore fed by a **CSV extract of `FCT_TAKES_EXPECTED`**, not a live
+connection — so the published dashboard is a snapshot and the daily pipeline
+does not refresh it.
+
+The one path to a live Tableau Public dashboard is a Google Sheets source, which
+it can refresh daily. That would require small pre-aggregated marts rather than
+the 356k-row extract, since the full table approaches Sheets' cell ceiling. Not
+built; noted as the option if it becomes worth it.
+
+Everything published to Tableau Public is public. That is fine for public MLB
+data and would not be for anything else.
+
+### The views
+
+**1 — Called-strike rate by location.** The empirical zone, binned at 0.1 ft,
+with the rulebook rectangle drawn on it. The called zone extends to roughly
+±0.85 ft horizontally where the plate edge is at ±0.708 — a difference of about
+a baseball's radius (0.12 ft), because a pitch is a strike if *any part of the
+ball* crosses the zone. Umpires are applying the rule correctly; the naive
+rectangle was the wrong rectangle.
+
+**2 — Called-strike rate by catcher.** Dot plot rather than bars: rates cluster
+around 0.32 across a 3.8-point range, and bars from zero would render every
+catcher identical. Dots sized by sample, minimum 3,000 takes, with a league
+average line. Labelled "called strike rate on takes," not "framing."
+
+**3 — Zone by count leverage.** The called zone under hitter's counts, even
+counts and pitcher's counts. Specific counts were abandoned for grouped ones
+because 3-0 holds only 6,999 takes — ~17 per bin, which the per-bin threshold
+erases. The conventional groupings (3-2 counts as even, not a hitter's count)
+hold 82,536 / 161,855 / 112,107 and survive the same bin settings.
+
+**4 — Framing by catcher, location-controlled.** Called strikes above expected
+by location, for Contreras, Bailey and Heim. Captioned with the per-cell noise
+limitation above.
+
+**5 — Staff vs skill.** Scatter of expected rate (the hand dealt) against
+strikes above expected (what they did with it), one dot per qualified catcher.
+A trend line on this chart is a test rather than decoration: the reputation
+effect described above predicts a positive slope, so a flat line is evidence
+against it.
+
+### Design notes that cost time
+
+**Normalizing vertical location destroys the aspect ratio.** `PLATE_X` is in
+feet and `PLATE_Z_NORM` is unitless, so a zone 1.42 ft wide and 1.0 units tall
+renders wider than tall. Rescaling the normalized height back onto a
+league-average zone (1.62–3.21 ft) puts both axes in feet; equal 4-ft spans and
+a square plot area then give true proportions. Tableau has no aspect-ratio lock,
+so the plot must be squared by sizing a fixed container on the dashboard.
+
+**Continuous versus discrete axes is a real trade.** Continuous bin pills give
+numeric axes that support reference lines, at the cost of marks that only tile
+when pixels-per-foot match in both directions. Discrete pills guarantee tiling
+at any size but lose reference lines. View 1 uses continuous because the
+rulebook rectangle carries its entire argument; the per-catcher maps use
+discrete because a clean tiled surface matters more there.
+
+**Publish a fixed-size dashboard, not a worksheet.** A worksheet reflows to the
+viewer's browser window, which is wide, and the zone squashes again. A
+fixed-size dashboard scales proportionally and holds its aspect on any screen.
+
+---
+
 ## Exploratory findings
 
 Not all takes are good data points for the model. Some are clearly strikes
@@ -770,6 +1023,13 @@ Not all takes are good data points for the model. Some are clearly strikes
 We will be filtering to pitches around the strike zone edges for the model.
 
 I don't understand mathematically how batter height creates the strike zone.
+(Partial answer found since: `sz_top` and `sz_bot` are not computed from height.
+They are measured per pitch from the batter's stance as the pitch is released —
+roughly the midpoint between shoulders and belt down to the hollow beneath the
+kneecap. They therefore vary pitch to pitch for the same batter, which means
+`PLATE_Z_NORM`'s denominator is a noisy measurement rather than a constant. Open
+question worth answering from this data: how much of the within-batter variation
+in `sz_top`/`sz_bot` is real stance variation versus measurement noise?)
 
 ### Row ordering from `statcast()`
 
@@ -785,13 +1045,13 @@ who work them.
 ## Repository hygiene
 
 Everything that a run produces is ignored: `output/`, `*.parquet`, `*.csv`,
-`venv/`, `__pycache__/`, `logs/`, `target/`, the backfill ledgers (`dates.txt`,
-`backfill_*.txt`, `backfill_run.log`) and the heartbeat stamps (`last_run.txt`,
-`last_data_loaded.txt`). Data belongs in GCS, never in the repo — `output/`
-covers the location and `*.parquet` covers the mistake of writing somewhere
-else. The heartbeats are the same ruling applied to the scheduler: runtime state
-the agent rewrites every morning would otherwise make the repository dirty
-daily, forever, with churn that carries no information.
+`venv/`, `__pycache__/`, `logs/`, `target/`, `tableau/`, the backfill ledgers
+(`dates.txt`, `backfill_*.txt`, `backfill_run.log`) and the heartbeat stamps
+(`last_run.txt`, `last_data_loaded.txt`). Data belongs in GCS, never in the
+repo — `output/` covers the location and `*.parquet` covers the mistake of
+writing somewhere else. The heartbeats are the same ruling applied to the
+scheduler: runtime state the agent rewrites every morning would otherwise make
+the repository dirty daily, forever, with churn that carries no information.
 
 One pattern per line, no delimiters: git treats each line literally, so a
 trailing comma makes a rule match only filenames ending in a comma. A missing
@@ -831,5 +1091,6 @@ object it built. The `dbt init` example models were removed from
 | Full 2026 season backfill | ✅ |
 | A4 — daily scheduling | ✅ |
 | **Layer 1 complete** | |
-| Layer 2 — Tableau | not started |
-| Layer 3 — framing model | not started |
+| Expected-strike baseline (`FCT_TAKES_EXPECTED`) | ✅ |
+| Layer 2 — Tableau Public dashboard | in progress |
+| Layer 3 — framing model with pitcher effects | not started |

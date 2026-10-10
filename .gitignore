@@ -12,3 +12,4 @@ backfill_run.log
 .DS_Store
 last_run.txt
 last_data_loaded.txt
+tableau/
