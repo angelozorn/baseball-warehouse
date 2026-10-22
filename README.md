@@ -10,7 +10,8 @@ uploads it to GCS, and loads it into BigQuery — replacing that day's partition
 atomically so re-runs are safe. dbt then cleans that raw table into a staging
 view, filters it into `FCT_TAKES`, and attaches a location-based
 expected-strike baseline in `FCT_TAKES_EXPECTED`. A launchd agent runs the
-whole chain every morning.
+whole chain every morning. `analysis/evaluate_models.py` is the scoreboard every
+model from here on is graded by.
 
 The warehouse holds the full 2026 regular season: 184 game days, 716,792
 events, 356,498 takes — plus postseason games as they are played, which staging
@@ -44,15 +45,17 @@ Baseball Savant  ──(pybaseball)──▶  pandas DataFrame
                                         ref()
                                           ▼
               DBT_DEV.FCT_TAKES                     (table — regular-season takes)
-                                   │             │
-                                 ref()         ref()
-                                   ▼             ▼
-       INT_EXPECTED_STRIKE_BY_BIN  ────▶  FCT_TAKES_EXPECTED
-       (league rate per location)         (takes + expected strike probability)
-                                                  │
-                                            CSV extract
-                                                  ▼
-                                         Tableau Public dashboard
+                        │          │             │
+                        │        ref()         ref()
+                        │          ▼             ▼
+                        │   INT_EXPECTED_STRIKE_BY_BIN  ────▶  FCT_TAKES_EXPECTED
+                        │   (league rate per location)         (takes + expected probability)
+                        │                                               │
+                        │                                         CSV extract
+                        │                                               ▼
+                        │                                      Tableau Public dashboard
+                        ▼
+              analysis/evaluate_models.py            (scoreboard — log loss, AUC, calibration)
 ```
 
 Every ingest layer derives its path from a single function, `partition_tail(date)`,
@@ -63,6 +66,9 @@ is a classic silent pipeline bug — one source of truth prevents it.
 Inside dbt, `{{ ref() }}` plays the same role: each model names its upstream
 rather than a hardcoded dataset, so dbt derives the build order from the SQL and
 the whole DAG retargets by changing one line in `profiles.yml`.
+
+The harness reads `FCT_TAKES` rather than `FCT_TAKES_EXPECTED` — see *The
+harness reads the un-baselined mart* under Layer 3.
 
 **Region note:** the GCS bucket, both BigQuery datasets, and the dbt profile are
 all `us-west1`. BigQuery cannot load from a bucket in a different location, and
@@ -85,6 +91,11 @@ pip install -r requirements.txt          # curated top-level dependencies
 `requirements-lock.txt` is a full `pip freeze` snapshot for exact reproduction.
 The curated file is the one to edit when a dependency is added — the lock is
 regenerated from a working environment, never hand-written.
+
+`db-dtypes` is in the curated file despite never being imported by name. The
+BigQuery client requires it to materialize DATE columns into pandas, and without
+it `to_dataframe()` raises at runtime — a dependency that is real but invisible
+to a grep for imports, which is exactly the kind the curated file exists to hold.
 
 Google Cloud authentication:
 
@@ -177,6 +188,17 @@ gcloud storage cp 'gs://mlb-catcher-framing/exports/fct_takes_expected.csv' tabl
 Catcher names are not in the warehouse; `tableau/catchers.csv` maps MLBAM IDs to
 names via `pybaseball.playerid_reverse_lookup` and is joined in Tableau. That
 mapping belongs in dbt as a seed eventually.
+
+### Score models
+
+```bash
+python3 analysis/evaluate_models.py                      # raw coordinates
+python3 analysis/evaluate_models.py --features distance  # distance from zone centre
+```
+
+Output is committed to `analysis/results_raw.txt` and
+`analysis/results_distance.txt`. Every figure in the Layer 3 section is
+re-derivable from those two files.
 
 ---
 
@@ -777,7 +799,11 @@ Three implementation choices worth stating:
 
 **Bin size and the zone constants are dbt vars** (`expected_bin_size`,
 `zone_bot`, `zone_top` in `dbt_project.yml`). They appear in two models, and
-during development the bin size changed four times. One edit beats a hunt.
+during development the bin size changed four times. One edit beats a hunt. The
+evaluation harness duplicates all three as Python constants, because it has to
+rebuild the bins from `FCT_TAKES` on the training split alone — so a change to
+the vars now means a change in two places, and the harness says so in a comment
+at the top of the file.
 
 **Bins are stored as integer indices, not float coordinates.** The join between
 the two models is on `X_BIN_IDX` / `Z_BIN_IDX` rather than on
@@ -848,8 +874,18 @@ on strikes-above-expected is `sqrt(n × 0.32 × 0.68)` — about ±44 strikes fo
 Contreras's 8,798 takes and ±34 for Heim's 5,404. So the correct statement is
 "indistinguishable from average," not "below average." Across all 54 catchers,
 the range runs +69 to −64 and almost nothing clears two standard deviations.
-**Controlling for location collapses most of the apparent spread into noise**,
-which is a more interesting result than a leaderboard.
+
+**Measured against chance, the spread is all noise.** Across the 54 qualified
+catchers the observed standard deviation of strikes above expected is **33.5**.
+The standard deviation expected from binomial noise alone,
+`SQRT(AVG(takes) × 0.2176)`, is **33.9**. They are the same number, so **no true
+between-catcher difference is detectable at one season with this method** —
+controlling for location does not shrink the apparent spread, it eliminates it.
+
+That is a statement about the method rather than about framing. Published metrics
+do find repeatable catcher differences, so the conclusion is not that framing
+does not exist; it is that 0.25-ft bins with no adjustment for count, handedness
+or pitcher are too coarse to see an effect measured in inches.
 
 **Location control is still not sufficient**, and the reason determines what
 Layer 3 must contain.
@@ -900,7 +936,9 @@ unexplained disagreement.
 Layer 3 replaces bins with a smooth model — logistic regression or a GAM over
 location, handedness, count and pitcher — which pools information across
 neighbouring locations instead of treating each cell as an independent sample.
-That is exactly what thin per-catcher data needs.
+That is exactly what thin per-catcher data needs. The attenuation argument above
+was a prediction when it was written; Layer 3's distance model turns it into a
+measurement, and the measurement is worse than the prediction.
 
 ### Naming convention: uppercase identifiers
 
@@ -920,6 +958,10 @@ Raw-layer column names stay as Savant delivers them, lowercase, because renaming
 them in the raw zone would be exactly the kind of editorializing that layer is
 supposed to avoid. Uppercase begins at staging, which is the layer entitled to
 hold naming opinions.
+
+Python in `analysis/` follows Python conventions, not this one. A convention
+about warehouse identifiers is not a convention about every file in the repo, and
+pretending otherwise would mean `SNAKE_CASE` function names.
 
 ### What a full season changed about a one-week sample
 
@@ -992,7 +1034,17 @@ limitation above.
 strikes above expected (what they did with it), one dot per qualified catcher.
 A trend line on this chart is a test rather than decoration: the reputation
 effect described above predicts a positive slope, so a flat line is evidence
-against it.
+against it. The measured slope is **−1,328 with a standard error of 506**
+(t = −2.62, p = 0.011, R² = 0.11) — significantly *negative*, the opposite of
+the reputation hypothesis. Catchers with better-locating staffs post lower
+strikes above expected, which means the location control is incomplete and the
+metric is still partly measuring pitcher behaviour.
+
+**6 — Methods & Findings.** A text worksheet, not a dashboard. Published
+verbatim text lives in `docs/dashboard_copy.md`, versioned alongside the
+pipeline that produced the figures in it, because none of those figures are
+Tableau fields — they are typed by hand and would go stale silently on a
+refresh.
 
 ### Design notes that cost time
 
@@ -1010,34 +1062,276 @@ at any size but lose reference lines. View 1 uses continuous because the
 rulebook rectangle carries its entire argument; the per-catcher maps use
 discrete because a clean tiled surface matters more there.
 
+**Reference lines are unavailable on Tableau bin objects.** The rulebook
+rectangle therefore comes from `ROUND(x / size) * size` calculated fields set to
+continuous dimensions, rather than from Tableau's own binning. Same bin edges,
+but a pill the reference-line dialog will accept.
+
+**Aggregation on a scatter axis changes what the chart is about.** The staff-vs-
+skill plot first used `SUM(EXPECTED_CS)` on the X axis, which ranges 0–3,000 and
+measures *playing time*. `AVG(EXPECTED_CS)` is what measures staff quality. The
+chart rendered identically well either way, and only one of them answered the
+question.
+
 **Publish a fixed-size dashboard, not a worksheet.** A worksheet reflows to the
 viewer's browser window, which is wide, and the zone squashes again. A
 fixed-size dashboard scales proportionally and holds its aspect on any screen.
 
-### Why ABS challenge data isn't used
+**Hidden worksheets do not publish.** Sheets hidden while building a dashboard
+stay hidden on Tableau Public, which is how a workbook ends up published with
+only its text tab visible. Unhide every sheet and check *Show sheets as tabs*
+before publishing, then verify in a private browser window — the author's own
+session shows sheets a visitor cannot see.
 
-2026 is the first MLB season with ABS challenges, and an overturned called
-strike is ground truth on framing: the pitch was objectively a ball and the
-catcher got it called a strike. That is a better measurement than any
-expected-strike baseline, and it was the first thing checked.
+### ABS challenge data: looked at and rejected
 
-The `statcast_search` export carries no challenge field. Challenge outcomes do
-appear, but only as unstructured text in `des` — the plate-appearance
-description — which means only challenges on the *terminal* pitch of an at-bat
-are visible at all.
+The automated ball-strike challenge system is live in 2026 — 10,557 challenges
+at a 54% overturn rate — and an umpire-independent ruling on borderline pitches
+would be close to ground truth for framing. It is not usable from this export.
 
-That subset cannot be used, and not merely because it is small. A **confirmed**
-challenge ends the at-bat only when the pitch was strike three; an
-**overturned** challenge ends it only when the pitch was ball four. The two
-outcomes therefore enter the visible data under different conditions, so any
-overturn rate computed from it is biased in a direction that depends on the
-thing being measured. The sample is unusable rather than merely thin.
+Statcast carries no challenge column. The only trace is in the plate-appearance
+description text, which exists solely for the **final pitch of an at-bat**. That
+truncation is not merely a sample-size problem: on a terminal pitch, a confirmed
+strike-three call and an overturned ball-four call enter the data under opposite
+conditions, so availability is correlated with the outcome being measured. A
+sample selected on its own dependent variable is worse than no sample.
 
-Pitch-level challenge data exists on Baseball Savant's ABS dashboard, which is
-a separate surface requiring its own ingest path. That is the single highest-value
-addition to this project: ~10,500 adjudicated pitches are both a direct measure
-of stolen strikes and a labeled validation set for the binned expected-strike
-baseline used here, which currently has no ground truth at all.
+Recorded here rather than dropped, because "we considered the obvious better
+instrument and here is the specific reason it fails" is worth more than silence
+about it.
+
+---
+
+## Layer 3 — modeling
+
+### The harness comes before any model
+
+`analysis/evaluate_models.py` is the scoreboard. Nothing in this layer is
+compared across different evaluation code: every model is scored by the same
+function, on the same split, with the same three metrics.
+
+**Three metrics, because one is not enough.** Log loss is the primary score — it
+penalizes confident wrongness, which is what a probability model should fear
+most. AUC measures ranking only, and ignores whether the numbers themselves mean
+anything. The calibration curve catches the opposite failure: a model can rank
+well and still emit probabilities nowhere near the observed rates. The raw
+logistic regression below fails calibration while passing AUC, which is exactly
+why all three are reported rather than one.
+
+**The split holds out whole games, not random pitches.** `GroupShuffleSplit` on
+`GAME_PK`, 80/20, `random_state=42`. Pitches in the same game share umpire,
+catcher, park and tracking calibration. A random pitch-level split would put
+those shared conditions on both sides and the model would be scored on context
+it had already seen.
+
+For a location-only model this costs almost nothing — location bins carry no
+game-specific information — and that near-zero cost is itself worth recording.
+The grouped split is insurance for the model *Why location-controlled still
+isn't framing* says Layer 3 has to become: once features carry umpire or catcher
+identity, group leakage becomes real, and the evaluation setup has to already be
+the right one.
+
+```
+all      356,498 pitches, 2,429 games
+train    285,076 pitches, 1,943 games
+test      71,422 pitches,   486 games
+base rate: train 0.3248, test 0.3226
+```
+
+### Scoreboard
+
+| Model | Log loss | AUC | Max calibration error |
+|---|---|---|---|
+| Constant (train base rate 0.3248) | 0.62885 | 0.50000 | 0.0022 |
+| Logistic regression, raw coordinates | 0.62793 | 0.54368 | 0.3575 |
+| Logistic regression, distance from centre | 0.21745 | 0.96628 | 0.0567 |
+| Binned lookup, fit on train, scored on held-out games | 0.14770 | 0.98450 | 0.0078 |
+
+All scored on the same 71,422 held-out pitches. The constant baseline uses the
+**train** base rate, not the season-wide 0.324 — a floor computed partly from the
+test set would itself be leaking, and the floor is the one number that has to be
+clean.
+
+The headline: **location alone reaches AUC 0.985.** Where the ball crossed very
+nearly determines the call, and whatever framing effect exists has to live inside
+the 0.148 of log loss that remains.
+
+### The leakage measurement, and why the obvious comparison fails
+
+`FCT_TAKES_EXPECTED` fits its bin means on the whole season and then scores the
+whole season, so every pitch contributes to its own prediction. The task was to
+convert that into a number by comparing it against a model fit on train and
+scored on held-out games.
+
+That comparison gives the wrong sign:
+
+```
+honest (fit train, score test)   0.14770
+leaky  (fit all,   score all)    0.14792
+                        gap     -0.00022
+```
+
+Cheating appears to have made the model *worse*, which is impossible. The two
+figures are computed on different row sets, and the difference between those row
+sets is larger than the leakage. Scoring the identical rows both ways separates
+them:
+
+| Comparison | Difference | What it isolates |
+|---|---|---|
+| honest − leaky, both on test rows | **+0.00131** | leakage |
+| leaky on all rows − leaky on test rows | +0.00154 | evaluation-set difficulty |
+| honest − leaky as originally framed | −0.00022 | the two above, cancelling |
+
+**The confound is larger than the signal.** The held-out games are 0.00154
+easier than the season average, which swamps 0.00131 of real leakage and flips
+the sign. Only the first row is a measurement of leakage; any comparison that
+changes both the fitting set and the scoring set at once is uninterpretable, and
+this one happens to be uninterpretable in the flattering direction.
+
+**Prediction against measurement.** The standard result for in-sample optimism is
+`k/N` nats per observation, which for 1,028 bins over 356,498 pitches predicts
+0.0029 — written down before running, along with the expectation that it would
+land in the third decimal and leave AUC essentially unmoved. Measured: 0.00131,
+under 1% of the binned model's log loss, with AUC moving 0.0001.
+
+Right order of magnitude, roughly half the predicted size, and the shortfall is
+left unexplained deliberately. `k/N` assumes each bin mean is estimated where it
+has room to vary, and a census shows most are nowhere near it:
+
+| Minority outcomes in bin | Bins |
+|---|---|
+| 0 | 891 |
+| 1–4 | 52 |
+| 5 or more | 85 |
+| **Total** | **1,028** |
+
+A bin whose 300 pitches are all balls has nothing to overfit — the fit is 0 on
+train, 0 on the season, and every held-out pitch in it is a ball, so both models
+pay the same nothing. **891 of the 1,028 bins contribute exactly zero to the
+gap.** Attributing the remaining 93.6 nats precisely would need per-row
+decomposition. Not done: the figure is a diagnostic, it changes no framing
+result and no modelling decision, and two separate attempts to explain the
+factor of two were refuted by the bin census itself. Writing down the
+measurement, the prediction and the size of the disagreement is the honest stopping
+point.
+
+### Feature shape, decided before fitting
+
+Both feature sets and both predictions were written down before either
+regression was run, because a prediction made after seeing the number is not a
+prediction.
+
+- **Raw** `PLATE_X` / `PLATE_Z_FT`. Expected to land near the intercept-only
+  floor with AUC clearly above 0.5.
+- **Distance**: `|PLATE_X|` and `|PLATE_Z_FT − 2.415|`, the midpoint of the
+  measured 1.62–3.21 ft zone. Expected to close most of the gap to the binned
+  model without beating it.
+
+Both held.
+
+**What a straight line gets wrong about a rectangle.** The raw model is
+`logit(p) = b₀ + b₁x + b₂z`. Every probability contour is a parallel straight
+line, so the model can only say "strikes get likelier as you move *this way*
+across the plane." The zone is a bounded box with balls on all four sides.
+Sorting pitches by a single linear score therefore walks from outside the zone,
+through it, and out the far side:
+
+```
+     predicted      actual
+        0.2941      0.0000
+        0.3054      0.0168
+        0.3112      0.3136
+        0.3162      0.5589
+        0.3211      0.5771   <- peak
+        0.3261      0.5522
+        0.3315      0.5400
+        0.3376      0.4993
+        0.3450      0.1677
+        0.3581      0.0006
+```
+
+Predictions span six percentage points; observed rates span zero to 58%, and are
+**non-monotone** — they rise and fall again while the model's score rises
+throughout. The model's most confident strike decile is called a strike 0.06% of
+the time. Maximum calibration error 0.3575. This is not an uninformative model,
+it is a confidently inverted one, and it is the single clearest artefact this
+layer produced.
+
+It is also the argument for reporting three metrics. AUC 0.544 reads as "weak but
+positive." The calibration table reads as "this model is wrong in a specific,
+structural way." Only one of those descriptions is useful.
+
+**Where the distance model still loses, and why it matters.** Two parameters
+close 0.411 of the 0.481 log-loss gap between raw and binned — 85%, against
+1,028 bin means. But two linear terms on absolute distances produce diamond
+contours and a cone: highest at the exact centre, falling at a constant rate
+outward. The real surface is a plateau with cliffs. The two worst-calibrated
+deciles are precisely the transition band:
+
+```
+        0.1434      0.1841   +0.0407   just outside, under-predicted
+        0.7208      0.6641   -0.0567   just inside,  over-predicted
+```
+
+Interior and far-exterior deciles are calibrated within 0.0014, and AUC 0.966
+against the binned 0.985 says the *ranking* is nearly intact. The loss is almost
+entirely bad probabilities at the edge.
+
+**That is the binding constraint on everything after this.** Framing only exists
+at the zone boundary — nobody frames a pitch down the middle or two feet
+outside. A model that is 85% as good overall can be worthless for this question
+if its error concentrates in the only band that matters. *Bins are not a model*
+predicted attenuation at the edge from the bin width; this measures the same
+failure in a smooth model that has no bins at all, which means the next model
+needs flexibility at the edge specifically, not more features generally.
+
+### Decisions
+
+**The harness reads the un-baselined mart.** `FCT_TAKES`, not
+`FCT_TAKES_EXPECTED` — the `EXPECTED_CS` column in the latter is fit on the whole
+season, which is the leakage being measured. Bin indices are recomputed in Python
+so they can be fit on the training split alone. The cost is three constants
+duplicated from the dbt vars, noted under *The expected-strike baseline*.
+
+**Unseen bins fall back to the training base rate.** 38 held-out pitches (0.05%)
+landed in bins with no training pitches. The base rate is the honest choice,
+because the model genuinely knows nothing about those locations. Their cost is
+roughly 0.0002 of the mean log loss — about 15% of the measured leakage gap.
+Small, but it is not leakage and should not be read as part of it.
+
+**Known fragility: the clip.** Predictions are clipped to `1e-15` so log loss
+stays finite. A training bin at exactly 0 that catches one held-out strike
+therefore costs 34.5 nats — 0.0005 of the mean, over a third of the measured
+gap, from one pitch. The honest run's lowest calibration decile shows zero
+observed strikes across ~7,100 pitches, so this did not fire here, but with 891
+single-outcome bins the exposure is real and the number is one unlucky pitch away
+from meaning something different.
+
+Laplace smoothing was considered and **rejected**. Roughly 40% of pitches sit in
+bins with rates under 0.012, and smoothing an all-ball bin of 300 from 0.000 to
+0.0033 charges that cost to every pitch in it — about 0.0012 overall, the same
+size as the quantity being measured. A correction as large as the signal is not a
+fix. If this is extended, the right move is to count contradicting rows
+explicitly rather than to shift every prediction.
+
+**Script, not notebook.** The harness is run from the command line, its output is
+committed as text, and its split is seeded. A notebook's cells can be run out of
+order and its state cannot be reconstructed from what is saved, which is a poor
+property for the file every later number is compared against.
+
+### What Layer 3b has to do
+
+Three constraints, each measured rather than assumed:
+
+1. **Flexibility at the zone edge**, because that is where both the binned model
+   and the distance model lose, and it is the only band framing lives in.
+2. **Pitcher effects alongside catcher effects**, from *Why location-controlled
+   still isn't framing* — the staff-quality slope of −1,328 (p = 0.011) says
+   location alone does not separate them.
+3. **A target worth measuring against.** Observed between-catcher spread 33.5
+   against 33.9 from chance means the current method has no signal to improve on.
+   Any new model has to beat chance before its catcher coefficients mean
+   anything, and the harness is what will say whether it does.
 
 ---
 
@@ -1045,7 +1339,10 @@ baseline used here, which currently has no ground truth at all.
 
 Not all takes are good data points for the model. Some are clearly strikes
 (right down the middle), and some are clearly balls (in the other batter's box).
-We will be filtering to pitches around the strike zone edges for the model.
+We will be filtering to pitches around the strike zone edges for the model. Layer
+3 put a number on why: 891 of 1,028 location bins contain a single outcome
+across an entire season, so the great majority of bins carry no information about
+a borderline call at all.
 
 I don't understand mathematically how batter height creates the strike zone.
 (Partial answer found since: `sz_top` and `sz_bot` are not computed from height.
@@ -1086,16 +1383,23 @@ glues the first new pattern onto the last old one, producing a single dead rule.
 right way to verify: it asks git what git thinks instead of reading the file and
 inferring.
 
+**`analysis/results_*.txt` are tracked, deliberately.** They are run output,
+which the rule above would ordinarily ignore — but they are the evidence behind
+every figure in the Layer 3 section, and a claim whose evidence lives only on one
+laptop is not a claim. They change only when a model changes, so they carry
+information rather than churn. The same reasoning that excludes the heartbeats
+includes these.
+
 `packages.yml` and `package-lock.yml` are tracked; `dbt_packages/` is not — the
 same relationship as `requirements.txt` to `venv/`. The lock file pins the
 resolved dbt_utils version so a fresh `dbt deps` cannot drift within the version
 range.
 
 **What must be committed to rebuild from a clone:** the ingest script, the two
-shell scripts, the dbt project, and `scheduler/`. The launchd plist is the one
-piece of the pipeline that otherwise exists only on one machine — the test is
-whether someone with a fresh clone can rebuild the scheduler, and without the
-committed copy the answer is no.
+shell scripts, the dbt project, `analysis/`, and `scheduler/`. The launchd plist
+is the one piece of the pipeline that otherwise exists only on one machine — the
+test is whether someone with a fresh clone can rebuild the scheduler, and without
+the committed copy the answer is no.
 
 **A dbt gotcha worth filing away:** deleting a model file does not drop the
 object it built. The `dbt init` example models were removed from
@@ -1118,4 +1422,5 @@ object it built. The `dbt init` example models were removed from
 | **Layer 1 complete** | |
 | Expected-strike baseline (`FCT_TAKES_EXPECTED`) | ✅ |
 | Layer 2 — Tableau Public dashboard | in progress |
-| Layer 3 — framing model with pitcher effects | not started |
+| L3a — evaluation harness + baselines | ✅ |
+| L3b — framing model with pitcher effects | not started |
