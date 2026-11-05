@@ -1,0 +1,295 @@
+loading FCT_TAKES ...
+  no nulls in any feature column
+  names from catcher_names.csv (111 catchers)
+
+  all    356,498 pitches, 2,429 games
+  train  285,076  ->  fit 227,720 / cal 57,356
+  test   71,422 pitches, 486 games
+
+======================================================================
+1. CHOOSING max_iter ON HELD-OUT GAMES
+======================================================================
+
+   max_iter   CAL log loss
+         50        0.12218
+        100        0.11988
+        200        0.12010
+        400        0.12056
+  chosen: 100
+
+======================================================================
+2. DOES IT NEED RECALIBRATION?
+======================================================================
+
+  calibration — GBM on CAL (never fit on these games)
+     predicted      actual       gap
+        0.0000      0.0000   -0.0000
+        0.0001      0.0002   +0.0001
+        0.0003      0.0000   -0.0003
+        0.0010      0.0009   -0.0001
+        0.0055      0.0047   -0.0008
+        0.0475      0.0495   +0.0020
+        0.3503      0.3580   +0.0077
+        0.8748      0.8755   +0.0008
+        0.9905      0.9934   +0.0029
+        0.9986      0.9997   +0.0011
+    max gap 0.0077
+
+  two-fold grouped check inside CAL
+    raw        0.11989
+    isotonic   0.12194   (+0.00205)
+  decision: SKIP recalibration
+
+======================================================================
+3. THE JURY, ON THE SAME TEST GAMES AS L3a
+======================================================================
+
+================================================================
+Constant (train base rate)
+  always predicts 0.3248
+----------------------------------------------------------------
+  n             71,422
+  log loss      0.62885   (lower is better)
+  AUC           0.50000   (higher is better)
+  max cal error 0.0022
+
+  calibration (10 quantile bins)
+     predicted      actual       gap
+        0.3248      0.3226   -0.0022
+
+================================================================
+Binned lookup — honest
+  38 test pitches in bins unseen in training
+----------------------------------------------------------------
+  n             71,422
+  log loss      0.14770   (lower is better)
+  AUC           0.98450   (higher is better)
+  max cal error 0.0078
+
+  calibration (10 quantile bins)
+     predicted      actual       gap
+        0.0000      0.0000   +0.0000
+        0.0006      0.0052   +0.0046
+        0.0017      0.0006   -0.0012
+        0.0120      0.0097   -0.0023
+        0.0785      0.0706   -0.0078
+        0.3809      0.3822   +0.0013
+        0.7977      0.7938   -0.0039
+        0.9880      0.9896   +0.0016
+        0.9998      0.9994   -0.0004
+
+================================================================
+GBM, raw (100 iterations)
+  location + count + handedness, no recalibration
+----------------------------------------------------------------
+  n             71,422
+  log loss      0.11857   (lower is better)
+  AUC           0.99024   (higher is better)
+  max cal error 0.0091
+
+  calibration (10 quantile bins)
+     predicted      actual       gap
+        0.0000      0.0000   -0.0000
+        0.0001      0.0000   -0.0001
+        0.0003      0.0000   -0.0003
+        0.0009      0.0003   -0.0006
+        0.0050      0.0024   -0.0027
+        0.0424      0.0435   +0.0011
+        0.3283      0.3317   +0.0034
+        0.8651      0.8560   -0.0091
+        0.9899      0.9927   +0.0029
+        0.9985      0.9997   +0.0012
+
+======================================================================
+SUMMARY
+======================================================================
+                     model     n  log_loss     auc  max_cal_error
+Constant (train base rate) 71422   0.62885 0.50000        0.00218
+    Binned lookup — honest 71422   0.14770 0.98450        0.00782
+ GBM, raw (100 iterations) 71422   0.11857 0.99024        0.00913
+
+  borderline band — predictions in (0.05, 0.95)
+  defined by 2 of 3 models; a model with no spread in its predictions cannot say
+  which pitches were hard, so it is scored but does not define
+
+  20,080 of 71,422 pitches (28.1%), called-strike rate 0.4574 against 0.3226 overall
+
+    model                                in band   log loss    vs ref
+    Binned lookup                         25.9%    0.48556     ref
+    GBM (100 iterations)                  21.4%    0.38880  -0.09676
+    Constant                             100.0%    0.72748  +0.24192
+
+  this is the comparison that bears on framing; the aggregate
+  table above is mostly a contest about obvious balls
+
+======================================================================
+4. OUT-OF-FOLD EXPECTATIONS FOR EVERY PITCH
+======================================================================
+    fold 1: 71,295 pitches scored
+    fold 2: 71,324 pitches scored
+    fold 3: 71,323 pitches scored
+    fold 4: 71,322 pitches scored
+    fold 5: 71,234 pitches scored
+
+  mean expected 0.32442 vs actual 0.32437  (difference +0.00004)
+  on a 7,000-take catcher that bias is 0.3 strikes;
+  a baseline off its own mean shifts every catcher the same way, so
+  this is the first number to read and nothing downstream reveals it
+
+  calibration — out-of-fold, all 356k pitches
+     predicted      actual       gap
+        0.0000      0.0001   +0.0000
+        0.0001      0.0001   +0.0000
+        0.0002      0.0001   -0.0001
+        0.0008      0.0008   -0.0000
+        0.0045      0.0045   -0.0000
+        0.0430      0.0443   +0.0014
+        0.3351      0.3366   +0.0014
+        0.8708      0.8651   -0.0057
+        0.9910      0.9926   +0.0016
+        0.9986      0.9997   +0.0011
+    max gap 0.0057
+
+======================================================================
+5. THE CHANCE TEST  (run before the leaderboard is read)
+======================================================================
+  54 qualified catchers, 20 probability strata
+    200 / 1,000 permutations
+    400 / 1,000 permutations
+    600 / 1,000 permutations
+    800 / 1,000 permutations
+    1,000 / 1,000 permutations
+
+  spread of strikes above expected
+    observed            33.58
+    null mean           13.70
+    null 2.5 / 97.5     11.03 / 16.51
+    observed is 14.2 null SDs above the null mean
+    p                   0.0010
+
+  sum of z-squared
+    observed            331.5
+    null mean           53.5   (must be ~54 if the variance model is right)
+    null 97.5           76.8
+    p                   0.0010
+
+  spread after partialling out staff quality
+    observed            31.65
+    null mean           13.54
+    null 97.5           16.39
+    p                   0.0010
+  if this survives, something about the catcher remains after his
+  staff is accounted for; if it collapses, the earlier rejection was
+  largely the staff confound wearing the catcher's name
+
+======================================================================
+6. PARTIAL POOLING
+======================================================================
+
+  54 catchers with 3,000+ takes
+  observed variance of excess rate   4.963e-05
+  mean sampling variance             7.360e-06
+  tau^2 = max(0, difference)         4.227e-05
+
+  true spread  sqrt(tau^2) = 0.00650  (0.65 points of called-strike rate)
+  equivalent Beta-Binomial strength  kappa = 5,185 takes
+  the median qualified catcher has 5,263
+  shrinkage factor range  0.772 to 0.913
+
+  top 10 by raw strikes above expected
+              NAME    N  RAW_RATE  EXP_RATE    SAE     SE     Z  SHRINK  SAE_SHRUNK
+    Dillon Dingler 7993     0.335     0.326 68.184 17.346 3.931   0.900      61.348
+    Alejandro Kirk 5083     0.323     0.311 61.654 13.329 4.626   0.860      53.027
+Brandon Valenzuela 5070     0.329     0.318 56.774 13.324 4.261   0.860      48.800
+      Austin Wells 7755     0.335     0.328 52.700 16.549 3.184   0.903      47.574
+   Adley Rutschman 5458     0.325     0.317 44.179 14.174 3.117   0.862      38.100
+      Luis Torrens 5504     0.324     0.316 43.699 13.840 3.157   0.870      38.013
+   Víctor Caratini 5307     0.333     0.325 41.162 13.765 2.990   0.863      35.510
+    Tyler Heineman 4310     0.324     0.315 39.468 12.456 3.169   0.835      32.956
+      Daniel Susac 3007     0.333     0.320 38.385 10.623 3.613   0.772      29.634
+          Joe Mack 6388     0.338     0.332 37.278 14.784 2.521   0.888      33.085
+
+  bottom 10
+            NAME    N  RAW_RATE  EXP_RATE     SAE     SE      Z  SHRINK  SAE_SHRUNK
+ Shea Langeliers 5548     0.315     0.321 -30.714 14.178 -2.166   0.866     -26.603
+    James Mccann 3034     0.310     0.320 -31.394 10.569 -2.970   0.777     -24.391
+  Salvador Pérez 3188     0.309     0.319 -33.834 10.861 -3.115   0.785     -26.545
+  Dalton Rushing 3767     0.324     0.334 -38.692 11.751 -3.293   0.813     -31.451
+  Drew Cavanaugh 3146     0.308     0.323 -45.694 10.841 -4.215   0.781     -35.672
+    Danny Jansen 4149     0.319     0.332 -52.674 12.091 -4.357   0.833     -43.861
+  Samuel Basallo 4111     0.323     0.336 -54.298 12.296 -4.416   0.825     -44.814
+Tyler Stephenson 8223     0.321     0.328 -60.061 17.126 -3.507   0.907     -54.471
+   Logan O'Hoppe 5219     0.320     0.333 -66.679 13.975 -4.771   0.855     -57.009
+     Connor Wong 4253     0.327     0.343 -67.332 12.953 -5.198   0.820     -55.215
+
+======================================================================
+7. PARTIALLING OUT THE PITCHING STAFF
+======================================================================
+
+  excess rate on staff expected rate
+    slope       -0.2702 per unit expected rate   (SE 0.1047, t = -2.58)
+    on the strikes scale, at the mean take count: -1,428
+    Layer 2 measured -1,328 (SE 506, p = 0.011) by OLS in Tableau
+
+  residual variance                  4.472e-05
+  mean sampling variance             7.360e-06
+  tau^2 after adjustment             3.736e-05
+  adjusted true spread  sqrt(tau^2) = 0.00611  (0.61 points)
+  unadjusted was        sqrt(tau^2) = 0.00650  (0.65 points)
+  staff quality explains 12% of the between-catcher variance
+
+  OVER-CONTROL: this is a lower bound on catcher effects. If good
+  framers are assigned to worse staffs, or if framing itself lowers
+  a staff's apparent expected rate, real signal is removed here.
+  The unadjusted figure is the upper bound. Only a within-team
+  contrast narrows the range.
+
+  top 10, staff-adjusted
+              NAME    N  EXP_RATE    SAE     Z  SAE_SHRUNK  SAE_RESID  SAE_ADJ
+    Dillon Dingler 7993     0.326 68.184 3.931      61.348     73.013   64.840
+      Austin Wells 7755     0.328 52.700 3.184      47.574     60.401   53.840
+          Joe Mack 6388     0.332 37.278 2.521      33.085     50.527   44.192
+Brandon Valenzuela 5070     0.318 56.774 4.261      48.800     47.799   40.343
+    Alejandro Kirk 5083     0.311 61.654 4.626      53.027     43.739   36.940
+   Víctor Caratini 5307     0.325 41.162 2.990      35.510     42.126   35.699
+    Patrick Bailey 6873     0.326 33.427 2.142      29.791     36.313   31.908
+        Liam Hicks 4251     0.337 22.733 1.844      18.961     37.673   30.753
+   Adley Rutschman 5458     0.317 44.179 3.117      38.100     33.536   28.408
+      Keibert Ruiz 6823     0.329 22.331 1.441      19.903     31.783   27.929
+
+  bottom 10, staff-adjusted
+            NAME    N  EXP_RATE     SAE      Z  SAE_SHRUNK  SAE_RESID  SAE_ADJ
+  Brett Sullivan 4332     0.314 -23.051 -1.832     -19.216    -34.984  -28.542
+  Salvador Pérez 3188     0.319 -33.834 -3.115     -26.545    -38.038  -29.023
+ Shea Langeliers 5548     0.321 -30.714 -2.166     -26.603    -35.489  -30.209
+  Samuel Basallo 4111     0.336 -54.298 -4.416     -44.814    -40.868  -32.973
+  Drew Cavanaugh 3146     0.323 -45.694 -4.215     -35.672    -46.797  -35.512
+    Danny Jansen 4149     0.332 -52.674 -4.357     -43.861    -44.361  -36.146
+     Connor Wong 4253     0.343 -67.332 -5.198     -55.215    -46.066  -36.904
+     Yainer Diaz 6110     0.312 -29.861 -2.033     -26.268    -49.232  -42.635
+Tyler Stephenson 8223     0.328 -60.061 -3.507     -54.471    -50.723  -45.447
+   Logan O'Hoppe 5219     0.333 -66.679 -4.771     -57.009    -54.270  -45.533
+
+======================================================================
+8. CATCHERS WITH AN OUTSIDE REPUTATION
+======================================================================
+  The README cites Bailey as the consensus best framer in baseball,
+  landing at only +0.63 SD under the binned baseline — offered as
+  evidence the method was too coarse. His rank here, especially the
+  staff-adjusted one, is the closest thing this project has to an
+  independent check on its own model.
+
+ RANK_RAW  RANK_ADJ              NAME    N  EXP_RATE     SAE      Z  SAE_SHRUNK  SAE_RESID  SAE_ADJ
+       11         7    Patrick Bailey 6873     0.326  33.427  2.142      29.791     36.313   31.908
+       40        14 William Contreras 8798     0.345 -22.736 -1.273     -20.716     27.745   24.989
+       29        43        Jonah Heim 5404     0.304   1.720  0.124       1.490    -27.844  -23.697
+
+  of 54 qualified catchers
+  a rank that improves under adjustment means the catcher was
+  being held back by a good staff, not helped by a bad one
+
+  raw SAE        sd 33.58   range -67.3 to +68.2
+  shrunk SAE     sd 28.68   range -57.0 to +61.3
+  adjusted SAE   sd 26.86   range -45.5 to +64.8
+  none of these three is the estimated true spread — posterior means
+  under-disperse by construction. Quote sqrt(tau^2) for that.

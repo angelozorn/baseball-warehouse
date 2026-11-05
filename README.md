@@ -2,7 +2,7 @@
 
 Pitch-level Statcast ingestion into BigQuery, transformed with dbt into
 modeling-ready fact tables of taken pitches, on a daily schedule, with a
-Tableau Public dashboard on top.
+Tableau Public dashboard and a catcher-framing model on top.
 
 `ingest_statcast.py` pulls a single day of Statcast data from Baseball Savant,
 writes it to a partitioned local Parquet file, verifies the write round-trips,
@@ -11,11 +11,25 @@ atomically so re-runs are safe. dbt then cleans that raw table into a staging
 view, filters it into `FCT_TAKES`, and attaches a location-based
 expected-strike baseline in `FCT_TAKES_EXPECTED`. A launchd agent runs the
 whole chain every morning. `analysis/evaluate_models.py` is the scoreboard every
-model from here on is graded by.
+model is graded by, and `analysis/model_framing.py` holds the framing baseline,
+the catcher attribution and the chance test.
 
 The warehouse holds the full 2026 regular season: 184 game days, 716,792
 events, 356,498 takes — plus postseason games as they are played, which staging
 keeps and the marts exclude.
+
+**The question, and the answer.** Can catcher framing be measured in public data,
+and separated from the quality of the pitching staff? Yes to the first: across 54
+qualified catchers the spread in strikes above expected is 33.58, against 13.70
+from chance, p < 0.001. Partly to the second: staff command is a real confound
+(slope −1,428 strikes per unit expected rate, t = −2.58) but explains only 12% of
+the between-catcher variance, and the spread still rejects chance after it is
+removed. Patrick Bailey, the one catcher here with an outside reputation to check
+against, lands 11th of 54 unadjusted and 7th adjusted.
+
+**Project status: complete as scoped.** Layers 1 through 3b are built, tested and
+documented. *Where this stops* names the one design that would resolve what is
+left, and why it is a separate project rather than a missing piece of this one.
 
 ---
 
@@ -56,6 +70,10 @@ Baseball Savant  ──(pybaseball)──▶  pandas DataFrame
                         │                                      Tableau Public dashboard
                         ▼
               analysis/evaluate_models.py            (scoreboard — log loss, AUC, calibration)
+                        │
+                        │  imports the jury and the data pull
+                        ▼
+              analysis/model_framing.py              (smooth baseline, shrinkage, chance test)
 ```
 
 Every ingest layer derives its path from a single function, `partition_tail(date)`,
@@ -67,8 +85,11 @@ Inside dbt, `{{ ref() }}` plays the same role: each model names its upstream
 rather than a hardcoded dataset, so dbt derives the build order from the SQL and
 the whole DAG retargets by changing one line in `profiles.yml`.
 
-The harness reads `FCT_TAKES` rather than `FCT_TAKES_EXPECTED` — see *The
-harness reads the un-baselined mart* under Layer 3.
+The analysis layer follows the same rule in Python: `model_framing.py` imports
+the jury and the data pull from `evaluate_models.py` rather than reimplementing
+either, so no two layers are ever compared across different evaluation code.
+Both read `FCT_TAKES` rather than `FCT_TAKES_EXPECTED` — see *The harness reads
+the un-baselined mart* under Layer 3.
 
 **Region note:** the GCS bucket, both BigQuery datasets, and the dbt profile are
 all `us-west1`. BigQuery cannot load from a bucket in a different location, and
@@ -185,20 +206,45 @@ bq extract --destination_format=CSV \
 gcloud storage cp 'gs://mlb-catcher-framing/exports/fct_takes_expected.csv' tableau/
 ```
 
-Catcher names are not in the warehouse; `tableau/catchers.csv` maps MLBAM IDs to
-names via `pybaseball.playerid_reverse_lookup` and is joined in Tableau. That
-mapping belongs in dbt as a seed eventually.
+Catcher names are not in the warehouse; the tracked mapping is
+`analysis/catcher_names.csv` — see *Score models*.
 
 ### Score models
 
 ```bash
 python3 analysis/evaluate_models.py                      # raw coordinates
 python3 analysis/evaluate_models.py --features distance  # distance from zone centre
+
+OMP_NUM_THREADS=1 python3 analysis/model_framing.py      # L3b
 ```
 
-Output is committed to `analysis/results_raw.txt` and
-`analysis/results_distance.txt`. Every figure in the Layer 3 section is
-re-derivable from those two files.
+Output is committed to `analysis/results_raw.txt`,
+`analysis/results_distance.txt` and `analysis/results_framing.txt`. Every figure
+in the Layer 3 and Layer 3b sections is re-derivable from those files.
+
+**`OMP_NUM_THREADS=1` is not decoration.** `HistGradientBoostingClassifier`
+builds its histograms in parallel, and floating-point summation order varies with
+thread scheduling, so `random_state` does not make it deterministic. Two
+unpinned runs on identical data produced test log losses of 0.11848 and 0.11857
+and moved individual catchers by about a strike — enough to swap adjacent ranks,
+and 7% of the whole leakage gap Layer 3 spent a section measuring. Pinned to one
+thread the run is slower and byte-identical, verified by:
+
+```bash
+OMP_NUM_THREADS=1 python3 analysis/model_framing.py | diff - analysis/results_framing.txt
+```
+
+A committed results file that does not reproduce is not evidence, which is why
+every L3b figure below is quoted to five decimals and the pin is part of the
+command rather than a footnote.
+
+`model_framing.py` writes `analysis/catcher_names.csv` on its first run, from one
+`pybaseball` lookup, and reads that cache on every run afterward. The file is
+committed, so a clone reproduces byte-identical output with no network call —
+results that depend on whether a lookup service answered are not reproducible.
+Hand edits survive, which is how `str.title()`'s "Mccann" became "McCann". That
+file is also the dbt seed this README has been promising since Layer 2; moving it
+to `transform/seeds/CATCHER_NAMES.csv` is the permanent fix.
 
 ---
 
@@ -782,7 +828,8 @@ encoding.
 **Horizontal location is not normalized.** The plate is a fixed width, so
 `PLATE_X` is already comparable across batters and needs no per-batter scaling.
 Handedness is carried (`BATTER_STANDS`, `PITCHER_THROWS`) so a model can learn
-the inside/outside asymmetry itself rather than having it baked in here.
+the inside/outside asymmetry itself rather than having it baked in here. Layer 3b
+does exactly that, and both handedness flags earn their place in the model.
 
 ### The expected-strike baseline
 
@@ -869,23 +916,43 @@ ranks Milwaukee first and Oakland last out of all 54. Contreras's pitchers put
 the ball in the best locations in baseball; Heim's in the worst. Once that is
 accounted for, both land at average.
 
-**Significance, because the headline deserves a bound.** The standard deviation
-on strikes-above-expected is `sqrt(n × 0.32 × 0.68)` — about ±44 strikes for
-Contreras's 8,798 takes and ±34 for Heim's 5,404. So the correct statement is
-"indistinguishable from average," not "below average." Across all 54 catchers,
-the range runs +69 to −64 and almost nothing clears two standard deviations.
+**Significance, and a formula that was wrong.** The bound originally quoted here
+used `sqrt(n × 0.32 × 0.68)` — the standard deviation of a catcher's strike total
+if every take were an independent coin flip at the league rate. Takes are not
+coin flips. A pitch down the middle is called a strike about 99.98% of the time
+and a pitch two feet outside essentially never, and neither contributes anything
+to the variance of a catcher's total.
 
-**Measured against chance, the spread is all noise.** Across the 54 qualified
-catchers the observed standard deviation of strikes above expected is **33.5**.
-The standard deviation expected from binomial noise alone,
-`SQRT(AVG(takes) × 0.2176)`, is **33.9**. They are the same number, so **no true
-between-catcher difference is detectable at one season with this method** —
-controlling for location does not shrink the apparent spread, it eliminates it.
+The correct variance is `Σ p_i(1−p_i)` over the catcher's own pitches, where each
+`p_i` is that pitch's expected strike probability. On this data the mean of
+`p(1−p)` is about 0.038 against the pooled 0.219, so **the original bound
+overstated the noise by roughly a factor of 2.4** and every standard-error and
+standard-deviation figure derived from it was too large by that factor.
 
-That is a statement about the method rather than about framing. Published metrics
-do find repeatable catcher differences, so the conclusion is not that framing
-does not exist; it is that 0.25-ft bins with no adjustment for count, handedness
-or pitcher are too coarse to see an effect measured in inches.
+Layer 3b computes the bound exactly, per catcher, and tests it against a
+permutation null that assumes nothing. See *The chance test* below.
+
+**Measured against chance — and this conclusion was reversed in Layer 3b.** The
+claim made here was that the observed spread of strikes above expected (33.5
+across 54 qualified catchers) matched the spread expected from chance alone
+(33.9), so no true between-catcher difference was detectable.
+
+**The observed figure was right and the chance figure was wrong.** It came from
+`SQRT(AVG(takes) × 0.2176)`, the inflated formula described above. A permutation
+test — shuffling catcher labels within strata of pitch difficulty, which assumes
+no variance formula at all — puts the chance spread at **13.70**, not 33.9.
+Against an observed 33.58 that is a rejection at p < 0.001, and the permuted null
+never exceeded 16.51 in a thousand draws.
+
+So catchers do differ by more than luck, and Layer 3b goes on to show that staff
+command explains only 12% of it. *The chance test* and *Partialling out the
+pitching staff* carry the full result.
+
+**Why the error survived as long as it did.** Two numbers agreed to within a
+percent and the agreement looked like confirmation. Nothing about 33.5 ≈ 33.9
+invited a second look at where 33.9 came from — a near-match is the most
+comfortable kind of wrong answer, and the only thing that caught it was replacing
+the formula with a procedure that could not inherit its assumption.
 
 **Location control is still not sufficient**, and the reason determines what
 Layer 3 must contain.
@@ -906,7 +973,8 @@ is on the list.
 **Consequence for Layer 3:** the model needs **pitcher effects alongside catcher
 effects**, so the two can be separated rather than assumed apart. A model
 conditioning on location alone would reproduce the same confound in smoother
-form.
+form. Layer 3b revises this: conditioning on the pitcher is the weaker answer,
+because catcher and staff are nearly the same variable. See *Where this stops*.
 
 ### Bins are not a model
 
@@ -920,10 +988,17 @@ per-catcher heatmaps are not interpretable; only the broad pattern is.
 
 **Attenuation.** A 0.25-ft bin straddling the zone edge contains pitches whose
 true strike probability ranges from roughly 0.2 to 0.8. Averaging across that
-gradient discards exactly the margin framing operates in. This likely explains
-why the observed spread (+69 to −64 strikes) is narrower than published framing
-estimates, and why Patrick Bailey — the consensus best framer in baseball —
-lands at +0.63 standard deviations rather than clearly positive.
+gradient discards exactly the margin framing operates in. Layer 3b measures the
+cost and localizes it: a smooth model recovers 0.02913 of log loss over these
+bins, and **93% of that comes from the 28% of pitches whose call was genuinely in
+doubt.** The attenuation is not a diffuse inefficiency — it is concentrated
+precisely at and just outside the called-zone edge.
+
+The **"+0.63 standard deviations" figure originally quoted here for Patrick
+Bailey is withdrawn.** It divided his strikes above expected by the inflated
+standard error described under *Significance, and a formula that was wrong*, so
+it understated him by roughly a factor of 2.4. His corrected position is in
+*The external check* under Layer 3b.
 
 **No other covariates.** Count, handedness and pitch type all shift the called
 zone and are not conditioned on.
@@ -938,7 +1013,7 @@ location, handedness, count and pitcher — which pools information across
 neighbouring locations instead of treating each cell as an independent sample.
 That is exactly what thin per-catcher data needs. The attenuation argument above
 was a prediction when it was written; Layer 3's distance model turns it into a
-measurement, and the measurement is worse than the prediction.
+measurement, and Layer 3b's gradient-boosted baseline cashes it in.
 
 ### Naming convention: uppercase identifiers
 
@@ -1006,6 +1081,11 @@ built; noted as the option if it becomes worth it.
 Everything published to Tableau Public is public. That is fine for public MLB
 data and would not be for anything else.
 
+**The workbook is built on the binned baseline, which matters for its text.** The
+Layer 3b corrections to `docs/dashboard_copy.md` fix the chance-spread arithmetic
+without quoting Layer 3b's model-specific figures, because putting a smooth-model
+number on a bin-based chart would be a new version of the same error.
+
 ### The views
 
 **1 — Called-strike rate by location.** The empirical zone, binned at 0.1 ft,
@@ -1040,11 +1120,16 @@ the reputation hypothesis. Catchers with better-locating staffs post lower
 strikes above expected, which means the location control is incomplete and the
 metric is still partly measuring pitcher behaviour.
 
+Layer 3b reproduces this independently: weighted least squares on the
+gradient-boosted baseline gives **−1,428** strikes per unit expected rate
+(t = −2.58) and the same 12% of variance explained. Two methods, two baselines,
+the same answer.
+
 **6 — Methods & Findings.** A text worksheet, not a dashboard. Published
 verbatim text lives in `docs/dashboard_copy.md`, versioned alongside the
 pipeline that produced the figures in it, because none of those figures are
 Tableau fields — they are typed by hand and would go stale silently on a
-refresh.
+refresh. One of them did worse than go stale: see *The chance test*.
 
 ### Design notes that cost time
 
@@ -1212,8 +1297,8 @@ gap.** Attributing the remaining 93.6 nats precisely would need per-row
 decomposition. Not done: the figure is a diagnostic, it changes no framing
 result and no modelling decision, and two separate attempts to explain the
 factor of two were refuted by the bin census itself. Writing down the
-measurement, the prediction and the size of the disagreement is the honest stopping
-point.
+measurement, the prediction and the size of the disagreement is the honest
+stopping point.
 
 ### Feature shape, decided before fitting
 
@@ -1282,8 +1367,7 @@ at the zone boundary — nobody frames a pitch down the middle or two feet
 outside. A model that is 85% as good overall can be worthless for this question
 if its error concentrates in the only band that matters. *Bins are not a model*
 predicted attenuation at the edge from the bin width; this measures the same
-failure in a smooth model that has no bins at all, which means the next model
-needs flexibility at the edge specifically, not more features generally.
+failure in a smooth model that has no bins at all.
 
 ### Decisions
 
@@ -1311,8 +1395,10 @@ Laplace smoothing was considered and **rejected**. Roughly 40% of pitches sit in
 bins with rates under 0.012, and smoothing an all-ball bin of 300 from 0.000 to
 0.0033 charges that cost to every pitch in it — about 0.0012 overall, the same
 size as the quantity being measured. A correction as large as the signal is not a
-fix. If this is extended, the right move is to count contradicting rows
-explicitly rather than to shift every prediction.
+fix. Layer 3b's partial pooling is the technique that fixes this properly, by
+shrinking toward a smooth function of location rather than toward a constant, and
+its isotonic floor of `1e-6` replaces the inherited float64 limit with a bound
+chosen for a reason.
 
 **Script, not notebook.** The harness is run from the command line, its output is
 committed as text, and its split is seeded. A notebook's cells can be run out of
@@ -1330,8 +1416,289 @@ Three constraints, each measured rather than assumed:
    location alone does not separate them.
 3. **A target worth measuring against.** Observed between-catcher spread 33.5
    against 33.9 from chance means the current method has no signal to improve on.
-   Any new model has to beat chance before its catcher coefficients mean
-   anything, and the harness is what will say whether it does.
+
+Point 3 is the one that did not survive contact with the data: the 33.9 was
+wrong, and there was signal all along.
+
+---
+
+## Layer 3b — the smooth baseline, the shrunk catcher, and the chance test
+
+`analysis/model_framing.py`, scored by the same jury as L3a on the same held-out
+games. Results in `analysis/results_framing.txt`, reproducible byte-for-byte
+under `OMP_NUM_THREADS=1` — see *Score models*.
+
+### The smooth baseline, and where its gain actually comes from
+
+| Model | Log loss | AUC | Max calibration error |
+|---|---|---|---|
+| Constant (train base rate 0.3248) | 0.62885 | 0.50000 | 0.0022 |
+| Binned lookup, fit on train | 0.14770 | 0.98450 | 0.0078 |
+| **Gradient boosting, 100 iterations** | **0.11857** | **0.99024** | 0.0091 |
+
+A 20% reduction in log loss. `HistGradientBoostingClassifier` on `PLATE_X`,
+`PLATE_Z_FT`, `BALLS`, `STRIKES` and both handedness flags, with `max_iter`
+chosen by log loss on a grouped inner split of TRAIN (50: 0.12218, **100:
+0.11988**, 200: 0.12010, 400: 0.12056).
+
+**The gain is concentrated where framing lives, which was not obvious and was
+initially argued the wrong way round.** Restricting the comparison to pitches
+either location model calls uncertain:
+
+| | pitches | binned | GBM | gap | share of total gain |
+|---|---|---|---|---|---|
+| borderline, predicted 0.05–0.95 | 20,080 (28.1%) | 0.48556 | 0.38880 | **0.09676** | **93%** |
+| outside the band | 51,342 (71.9%) | 0.0155 | 0.0129 | 0.0027 | 7% |
+| all test pitches | 71,422 | 0.14770 | 0.11857 | 0.02913 | 100% |
+
+(The band rows are measured; the outside-band row is derived from them and the
+aggregate.) The band's called-strike rate is **0.4574** against 0.3226 overall —
+these really are the pitches in doubt. **28% of the pitches carry 93% of the
+improvement.**
+
+The first version of this section claimed the opposite — that almost all the gain
+was on easy pitches and the aggregate table was "a contest about obvious balls."
+The evidence offered was the binned model hedging at 0.0785 where the GBM says
+0.0050. **But 0.0785 is above 0.05, so those pitches are inside the borderline
+band.** A lookup table predicting 8% on pitches that go 0.7% is not a model doing
+well on easy calls; it is the edge-attenuation failure itself. The band's own
+contents were used as evidence that the band did not matter.
+
+One qualification on the 93%: the band is the union of what either model calls
+uncertain, and binned puts 25.9% of pitches in it against the GBM's 21.4%. So
+roughly 4,800 of the 20,080 are pitches only the lookup table finds hard, where
+the GBM wins by correctly calling them near-certain. That is still the
+edge-attenuation failure — those pitches sit spatially just outside the called
+zone — but it is not the framing margin proper.
+
+**Why early stopping is switched off.** sklearn's `early_stopping='auto'` carves a
+*random* validation slice out of the training rows, which puts pitches from the
+same game on both sides of it — the exact leakage the grouped split exists to
+prevent, applied inside the estimator where no reported split would show it.
+`max_iter` is selected on a grouped split instead. `min_samples_leaf` is raised
+from 20 to 200 because a 20-pitch leaf at the zone edge estimates a rate to about
+±11 points, which is noise the model is supposed to pool away.
+
+**It needs no recalibration, and the check says so rather than the eye.** Max
+calibration gap 0.0077 on held-out games, with errors that are not monotone — low
+deciles over-predict, 0.3503 under-predicts by 0.0077, 0.8748 is nearly exact. A
+two-fold grouped isotonic fit inside the calibration split made held-out log loss
+*worse*, 0.11989 to 0.12194. Isotonic is a step function, and in the region where
+the GBM distinguishes 0.0001 from 0.0009 the resolution it destroys costs more
+than the calibration it buys.
+
+The decision rule was fixed in advance: adopt recalibration if and only if an
+isotonic fit improves log loss on games its own fit never saw. The test set plays
+no part in it.
+
+**The number that mattered most** is the out-of-fold mean: expected 0.32442
+against actual 0.32437, off by **0.00004** — three tenths of a strike on a
+7,000-take catcher. Strikes above expected is a subtraction, so a baseline whose
+mean misses the true rate shifts *every* catcher the same direction, and nothing
+in a leaderboard reveals it.
+
+### The chance test
+
+Every catcher's expectation comes from a model fit on games that catcher's pitch
+was not in — `GroupKFold(5)` on `GAME_PK` across all 356,498 takes, with the
+fit/calibrate recipe repeated inside each fold. Without this, four fifths of the
+expectations would be in-sample, each pulled toward its own outcome, which
+shrinks strikes above expected toward zero and biases a chance test toward
+finding nothing. That is the one direction a chance test must not be biased in.
+
+Catcher labels are then permuted **within 20 strata of the baseline's own
+predicted probability**, 1,000 times.
+
+**Why that stratum.** Permuting globally would scramble the fact that catchers
+receive different mixes of easy and hard pitches, and that mix moves strikes above
+expected with no skill involved — so a global null would be too narrow and the
+test anti-conservative. Stratifying on raw location is not enough either, because
+the baseline also conditions on count and handedness and the called zone shifts
+with both. The predicted probability is the sufficient summary of everything the
+baseline knows, so holding it fixed holds fixed exactly the difficulty each
+catcher was dealt.
+
+Permuting a label vector *within* a stratum preserves the multiset of labels in
+it, so every permuted catcher keeps **exactly** their real number of takes and
+**exactly** their real distribution across difficulty strata. Only the pairing to
+outcomes is randomized.
+
+```
+spread of strikes above expected
+  observed            33.58
+  null mean           13.70
+  null 2.5 / 97.5     11.03 / 16.51
+  observed is 14.2 null SDs above the null mean
+  p                   0.0010      (the floor at 1,000 permutations)
+
+sum of z-squared
+  observed           331.5
+  null mean           53.5        (must be ~54 if the variance model is right)
+  null 97.5           76.8
+  p                   0.0010
+```
+
+The observed spread is 2.4x the null and more than twice the null's own 97.5th
+percentile. Seven catchers clear |z| = 4, where the null expects 0.003 of them.
+
+**This is where the 33.9 in *Why location-controlled still isn't framing* died.**
+That figure assumed every take was a coin flip at the league rate; the permutation
+null, which assumes no formula at all, puts chance at 13.70.
+
+**Two free correctness checks came with it.** The `Σz²` null mean must equal the
+number of qualified catchers if `Σp(1−p)` is the right per-pitch variance — it
+came back 53.5 against 54, confirming the variance model that replaced the wrong
+formula. And the calibration split scored 0.11989 against the test set's 0.11857,
+making the test games 0.00132 easier than average; L3a measured the same effect at
+0.00154 by an unrelated route.
+
+### Partialling out the pitching staff
+
+`EXP_RATE` — a catcher's mean expected called-strike rate — is a pitching-staff
+command index. Regressing excess rate on it by weighted least squares, with two
+passes of feasible GLS so the slope's standard error admits real between-catcher
+variance rather than crediting all residual scatter to sampling noise:
+
+```
+slope  -0.2702 per unit expected rate   (SE 0.1047, t = -2.58)
+on the strikes scale, at the mean take count:  -1,428
+Layer 2 measured -1,328 (SE 506, p = 0.011) by OLS in Tableau
+
+tau^2 unadjusted   4.227e-05   ->  sqrt = 0.00650   (0.65 points)
+tau^2 adjusted     3.736e-05   ->  sqrt = 0.00611   (0.61 points)
+staff quality explains 12% of the between-catcher variance
+
+spread after partialling out staff quality
+  observed  31.65     null mean 13.54     null 97.5 16.39     p 0.0010
+```
+
+**The confound is real and small.** The slope reproduces the Layer 2 chart by a
+different method on a different baseline (−1,428 against −1,328), and the 12%
+variance share matches that chart's R² = 0.11. So the staff effect is confirmed
+twice and bounded: **88% of the between-catcher variance survives it, and the
+residual spread still rejects chance at p = 0.001.**
+
+A reading of the leaderboard's `EXP_RATE` columns initially suggested the confound
+was far larger — the top ten average 0.3208 against the bottom ten's 0.3289. The
+arithmetic resolves it: a 0.0081 gap times the slope times a median 5,400 takes is
+about 12 strikes of a 96.5-strike top-to-bottom difference. Twelve percent, the
+same answer from both directions. The 0.0081 looked impressive as a fraction of
+`EXP_RATE`'s range and was never multiplied by the slope.
+
+**Over-control, which is why 12% is an upper bound on the confound.** Staff
+quality is not a clean instrument for staff quality. If good framers are
+systematically assigned to worse staffs, or if framing itself depresses a staff's
+apparent expected rate, this regression removes real catcher signal along with the
+confound. So the adjusted spread of 0.61 points is a **lower** bound on catcher
+effects and the unadjusted 0.65 an upper bound.
+
+**One uncertainty this does not propagate.** `SHRINK_ADJ` uses only the sampling
+variance of the residual, not the variance contributed by *estimating the slope*.
+For a catcher near the mean `EXP_RATE` that is negligible. At the extremes it is
+not: Contreras sits at 0.345, about +0.020 from the mean, so the slope's SE of
+0.1047 contributes roughly ±18 strikes to his adjustment on top of his own ±17.9.
+His adjusted +27.7 is therefore barely one standard error from zero, and his move
+from 40th to 14th should be read as "the adjustment is large and uncertain for
+him," not as a ranking. A within-team contrast needs no slope and so has no such
+term.
+
+### Partial pooling, with the strength measured rather than chosen
+
+The model is `d_c = θ_c + noise`, where `d_c` is the catcher's excess
+called-strike rate, the noise variance `v_c` is known exactly from the baseline's
+own probabilities, and `θ_c ~ N(0, τ²)`. The prior mean is zero because the
+baseline *is* the expectation — a catcher with no effect has `d_c = 0` by
+construction. Method of moments gives `τ² = max(0, Var(d) − mean(v))`, and the
+posterior mean is `τ²/(τ² + v_c) · d_c`.
+
+**The shrinkage strength is not a knob.** It is the ratio of real between-catcher
+variance to within-catcher noise, both estimated. The equivalent Beta-Binomial
+strength is **κ = 5,185 takes** — the point at which a catcher's own record
+carries half the weight — against a median qualified catcher's 5,263. So
+shrinkage here is mild: factors run 0.772 to 0.913, nobody loses more than 23% of
+their estimate, and the raw ordering largely survives.
+
+The floor at zero is load-bearing rather than defensive. Had the observed spread
+failed to exceed the noise, `τ²` would be zero, every posterior mean exactly zero,
+and the honest leaderboard a flat column. Given this README's previous conclusion,
+that was the expected outcome when the code was written.
+
+**Quote `sqrt(τ²)` for the spread, not a column's standard deviation.** Raw SAE
+has sd 33.58, shrunk 28.68, adjusted 26.86 — and none of the three estimates the
+true spread, because posterior means under-disperse by construction. The estimate
+is 0.65 points of called-strike rate unadjusted, 0.61 adjusted, or about 34
+strikes over a median season.
+
+### The external check
+
+```
+ RANK_RAW  RANK_ADJ              NAME    N  EXP_RATE     SAE      Z  SAE_RESID  SAE_ADJ
+       11         7    Patrick Bailey 6873     0.326  33.427  2.142     36.313   31.908
+       40        14 William Contreras 8798     0.345 -22.736 -1.273     27.745   24.989
+       29        43        Jonah Heim 5404     0.304   1.720  0.124    -27.844  -23.697
+```
+
+*Bins are not a model* offered Patrick Bailey at +0.63 standard deviations,
+against his reputation as the consensus best framer in baseball, as evidence the
+binned method was too coarse. That figure used the inflated standard error, so it
+understated him by roughly a factor of 2.4.
+
+**Bailey is 11th of 54 raw and 7th adjusted — clearly positive on both, at
+z = 2.14.** His `EXP_RATE` of 0.326 sits near the mean, so the staff adjustment
+barely moves him (33.4 to 36.3) and his improvement in rank comes mostly from
+others moving. That makes his the robust row on this table, and it is the check
+passing: the method the broken standard error could not distinguish from average
+now places the one catcher with an outside reputation in the top eighth.
+
+It does not place him first, which is the honest limit of the result. Either the
+metric is still carrying circumstance the staff adjustment does not reach, or 2026
+was not his best season, or a reputation built over several years is not a
+prediction about one of them. The data here cannot choose between those.
+
+**The name mapping is verified rather than assumed.** All three rows reproduce
+figures computed independently under the binned baseline: Contreras .343/.345 and
+8,798 takes against .3428/.3456, Bailey .331/.326 against .3306/.3270, Heim
+.304/.304 and 5,404 takes against .3042/.3044.
+
+### What is and is not established
+
+**Established.** Catchers differ in called strikes above expected by more than
+chance, decisively (33.58 against 13.70, p < 0.001, 14.2 null SDs). Pitching-staff
+command is a real confound, measured twice at −1,328 and −1,428 strikes per unit
+expected rate, and it accounts for 12% of the between-catcher variance. The spread
+survives removing it. The true spread is between 0.61 and 0.65 points of
+called-strike rate, about 34 strikes a season at one standard deviation.
+
+**Not established.** That the surviving variation is *framing skill*. Catcher
+identity remains nearly collinear with home park and umpire-crew exposure, neither
+of which the staff adjustment touches, and 54 catchers across 30 teams leaves
+little room to separate a catcher from his circumstances by regression. The
+chance test proves catcher identity carries information the baseline lacks; it
+cannot say what that information is about.
+
+---
+
+## Where this stops
+
+The project is complete as scoped. One design would resolve what is left, and it
+is a separate project rather than a missing piece of this one.
+
+**The within-team contrast.** Compare a starter against his own backup. They
+share the pitching staff, the home park and roughly the same umpire crews, so the
+between-team component drops out of the contrast instead of being modelled away —
+no slope to estimate, no over-control caveat, no uncertainty to propagate into
+extreme-`EXP_RATE` catchers. The cost is power: backups accumulate few takes, so
+one season of pairs is thin and the design wants several.
+
+Two smaller items the measurements above point at, both cheap and both deferred:
+
+- **Flexibility in the borderline band specifically.** The GBM's own worst
+  calibration sits at 0.3503 and 0.8748, and that band is 28% of pitches and 93%
+  of the modelling gain. The aggregate score should not be the objective for a
+  question that lives in one band.
+- **The previous pitch's call as a feature**, testing the sequential-effects
+  result cited under *Why location-controlled still isn't framing* against 2026
+  data.
 
 ---
 
@@ -1339,10 +1706,9 @@ Three constraints, each measured rather than assumed:
 
 Not all takes are good data points for the model. Some are clearly strikes
 (right down the middle), and some are clearly balls (in the other batter's box).
-We will be filtering to pitches around the strike zone edges for the model. Layer
-3 put a number on why: 891 of 1,028 location bins contain a single outcome
-across an entire season, so the great majority of bins carry no information about
-a borderline call at all.
+Layer 3 put a number on why: 891 of 1,028 location bins contain a single outcome
+across an entire season. Layer 3b put the sharper number on it — the 28% of
+pitches whose call is genuinely in doubt carry 93% of what a better model buys.
 
 I don't understand mathematically how batter height creates the strike zone.
 (Partial answer found since: `sz_top` and `sz_bot` are not computed from height.
@@ -1383,12 +1749,20 @@ glues the first new pattern onto the last old one, producing a single dead rule.
 right way to verify: it asks git what git thinks instead of reading the file and
 inferring.
 
-**`analysis/results_*.txt` are tracked, deliberately.** They are run output,
-which the rule above would ordinarily ignore — but they are the evidence behind
-every figure in the Layer 3 section, and a claim whose evidence lives only on one
-laptop is not a claim. They change only when a model changes, so they carry
-information rather than churn. The same reasoning that excludes the heartbeats
-includes these.
+**Two exceptions in `analysis/`, both deliberate.**
+
+`analysis/results_*.txt` are run output, which the rule above would ordinarily
+ignore — but they are the evidence behind every figure in the Layer 3 and
+Layer 3b sections, and a claim whose evidence lives only on one laptop is not a
+claim. They change only when a model changes, so they carry information rather
+than churn.
+
+`analysis/catcher_names.csv` needs an explicit negation —
+`!analysis/catcher_names.csv` — because `*.csv` catches it. It is tracked so a
+clone reproduces the leaderboard with names and no network call, and because a
+results file whose contents depend on whether a lookup service answered is not
+reproducible. The same reasoning that excludes the heartbeats includes both of
+these.
 
 `packages.yml` and `package-lock.yml` are tracked; `dbt_packages/` is not — the
 same relationship as `requirements.txt` to `venv/`. The lock file pins the
@@ -1408,6 +1782,29 @@ object it built. The `dbt init` example models were removed from
 
 ---
 
+## Corrections
+
+Claims this repository made and later had to withdraw. Kept as a list rather
+than quietly edited away, because the pattern in them is more useful than any one
+entry.
+
+| Claim | What was wrong | Found by |
+|---|---|---|
+| Location is null only for automatic rulings | True of a seven-day sample, false of the season — 369 genuine tracking failures | A singular test, once it ran on 184 days |
+| Expected strike rate is 0.049 | A Tableau LOD aggregated at bin grain, not row grain | A scatter axis reading 0.10–0.14 where 0.32 was expected |
+| Leakage gap is the honest-minus-leaky difference | Those two numbers are scored on different row sets; the confound exceeded the signal and flipped the sign | Scoring identical rows both ways |
+| Chance spread is 33.9, so no catcher differs from average | The variance formula assumed every take was a coin flip at the league rate; the real figure is 13.70 and catchers do differ | A permutation test, which could not inherit the assumption |
+| Patrick Bailey is +0.63 SD | Divided by the same inflated standard error | The same correction |
+| The smooth model's gain is mostly on easy pitches | Backwards: 93% of it is on the 28% of pitches whose call was in doubt. The hedged 0.0785 decile offered as evidence is *inside* the borderline band | The band comparison, once a bug stopped it selecting every row |
+| Staff quality dominates the leaderboard | An `EXP_RATE` gap read as a fraction of its own range rather than multiplied by the slope; it is 12% | Weighted least squares, agreeing with the eyeball once the eyeball did the arithmetic |
+
+Four of the seven were caught by a check that did not share the broken
+assumption. Two were one error propagating. The one that survived longest is the
+chance spread, and it survived because **33.5 and 33.9 agreed** — a near-match
+reads as confirmation and gets re-examined least.
+
+---
+
 ## Status
 
 | Stage | |
@@ -1421,6 +1818,7 @@ object it built. The `dbt init` example models were removed from
 | A4 — daily scheduling | ✅ |
 | **Layer 1 complete** | |
 | Expected-strike baseline (`FCT_TAKES_EXPECTED`) | ✅ |
-| Layer 2 — Tableau Public dashboard | in progress |
+| Layer 2 — Tableau Public dashboard | ✅ |
 | L3a — evaluation harness + baselines | ✅ |
-| L3b — framing model with pitcher effects | not started |
+| L3b — smooth baseline, partial pooling, chance test | ✅ |
+| **Project complete as scoped** — see *Where this stops* | |
