@@ -1,0 +1,171 @@
+loading FCT_TAKES ...
+  names from catcher_names.csv (111 catchers)
+
+======================================================================
+1. RUN VALUE OF A CALLED STRIKE, BY COUNT
+======================================================================
+
+  run value of a ball -> called-strike flip, by count
+  measured from delta_run_exp over 356,688 takes
+
+      count     balls   strikes     runs     used
+    0-0      67,492.0  53,800.0   0.0792   0.0792
+    0-1      34,404.0   9,863.0   0.0863   0.0863
+    0-2      19,696.0   1,829.0   0.1896   0.1896
+    1-0      22,831.0  16,145.0   0.1164   0.1164
+    1-1      23,176.0   7,637.0   0.1191   0.1191
+    1-2      24,128.0   2,738.0   0.2331   0.2331
+    2-0       7,398.0   6,642.0   0.1779   0.1779
+    2-1      10,482.0   4,684.0   0.1848   0.1848
+    2-2      16,744.0   2,779.0   0.3276   0.3276
+    3-0       2,548.0   4,457.0   0.1977   0.1977
+    3-1       4,476.0   2,919.0   0.2901   0.2901
+    3-2       7,615.0   2,205.0   0.6157   0.6157
+
+  pooled (occurrence-weighted): 0.1493
+  canonical flat value:         0.1250
+  spread across counts:         0.0792 to 0.6157 (7.8x)
+
+======================================================================
+2. OUT-OF-FOLD EXPECTATIONS
+======================================================================
+    fold 1: 71,295 pitches scored
+    fold 2: 71,324 pitches scored
+    fold 3: 71,323 pitches scored
+    fold 4: 71,322 pitches scored
+    fold 5: 71,234 pitches scored
+
+======================================================================
+3. FRAMING RUNS PER CATCHER
+======================================================================
+
+  flat run value
+    observed variance   7.749e-07
+    sampling variance   1.149e-07
+    tau^2               6.600e-07   sqrt = 0.00081 runs per take
+    signal-to-noise     5.75
+    mean reliability    0.853   (attenuates an external correlation by 0.924)
+    one SD over a median season (5,263 takes): 4.3 runs
+    shrinkage 0.772 to 0.913
+
+  wtd run value
+    observed variance   1.017e-06
+    sampling variance   2.011e-07
+    tau^2               8.158e-07   sqrt = 0.00090 runs per take
+    signal-to-noise     4.06
+    mean reliability    0.805   (attenuates an external correlation by 0.897)
+    one SD over a median season (5,263 takes): 4.8 runs
+    shrinkage 0.691 to 0.884
+
+  flat 0.125 against count-weighted
+    correlation of values      0.9609
+    rank correlation           0.9530
+    mean absolute rank change  3.48 places
+    largest rank change        12 places
+    catchers moving 5+ places  16 of 54
+    sum over qualified, flat       +12.2
+    sum over qualified, weighted   +11.4
+  that sum is near zero by construction and is not a league total
+
+  top 15, count-weighted framing runs
+              NAME    N  EXP_RATE  RUNS_FLAT_SHRUNK  RUNS_WTD_SHRUNK  RANK_FLAT  RANK_WTD  RANK_MOVE
+    Dillon Dingler 7993      0.33              7.76             9.09          1         1          0
+      Austin Wells 7755      0.33              5.76             8.97          4         2         -2
+Brandon Valenzuela 5070      0.32              6.15             7.27          3         3          0
+    Alejandro Kirk 5083      0.31              6.76             7.04          2         4          2
+        Liam Hicks 4251      0.34              2.50             4.91         15         5        -10
+   Hunter Feduccia 4874      0.32              3.41             4.78         12         6         -6
+   Víctor Caratini 5307      0.32              4.46             4.67          7         7          0
+    Tyler Heineman 4310      0.32              4.19             4.53          8         8          0
+    Patrick Bailey 6873      0.33              3.77             3.78         10         9         -1
+      Luis Torrens 5504      0.32              4.59             3.49          6        10          4
+      Daniel Susac 3007      0.32              3.66             3.43         11        11          0
+          Joe Mack 6388      0.33              4.15             3.37          9        12          3
+   Adley Rutschman 5458      0.32              4.73             3.28          5        13          8
+    Gabriel Moreno 6805      0.31              2.90             2.90         14        14          0
+      Keibert Ruiz 6823      0.33              2.48             2.70         16        15         -1
+
+  bottom 10
+             NAME    N  EXP_RATE  RUNS_FLAT_SHRUNK  RUNS_WTD_SHRUNK  RANK_FLAT  RANK_WTD  RANK_MOVE
+William Contreras 8798      0.35             -2.45            -3.66         41        45          4
+   Dalton Rushing 3767      0.33             -3.96            -3.82         48        46         -2
+   Drew Cavanaugh 3146      0.32             -4.51            -3.98         49        47         -2
+     James Mccann 3034      0.32             -2.99            -4.09         43        48          5
+      Connor Wong 4253      0.34             -6.82            -5.44         53        49         -4
+      Cal Raleigh 6821      0.33             -3.07            -6.03         44        50          6
+   Samuel Basallo 4111      0.34             -5.64            -6.10         51        51          0
+     Danny Jansen 4149      0.33             -5.38            -6.38         50        52          2
+    Logan O'Hoppe 5219      0.33             -7.11            -7.22         54        53         -1
+ Tyler Stephenson 8223      0.33             -6.48            -7.37         52        54          2
+
+  wrote framing_runs_leaderboard.csv (54 catchers)
+
+======================================================================
+4. SAVANT COMPARISON
+======================================================================
+
+  savant_framing_2026.csv: 56 rows
+  columns: ['id', 'name', 'pitches', 'rv_tot', 'pct_tot', 'rv_11', 'pct_11', 'rv_12', 'pct_12', 'rv_13', 'pct_13', 'rv_14', 'pct_14', 'rv_16', 'pct_16', 'rv_17', 'pct_17', 'rv_18', 'pct_18', 'rv_19', 'pct_19']
+  using id column 'id' and value column 'rv_tot'
+
+  matched 54 of 54 qualified catchers
+
+    count-weighted, shrunk        Spearman +0.890 (p=2.2e-19)   Pearson +0.915
+    flat, shrunk                  Spearman +0.937 (p=2.1e-25)   Pearson +0.947
+    staff-adjusted strikes        Spearman +0.816 (p=5.4e-14)   Pearson +0.839
+
+  attenuation floor: the weighted metric is noisier, which
+  alone predicts the flat correlation running 1.029x
+  higher. Only a gap clearly beyond that says anything about
+  Savant's own run-value weighting.
+
+  population difference
+    their called pitches / our takes:  median 1.043, range 1.030 to 1.060
+  our takes filter drops blocked_ball — 14,894 league-wide, or
+  4.0% of takes-plus-blocked — and null-location rows. A ratio
+  near 1.04 means that exclusion IS the population difference,
+  measured rather than asserted.
+
+  they rate these catchers much higher than we do
+             NAME    N  EXP_RATE  STAFF_DEV  RUNS_WTD_SHRUNK  SAVANT  RANK_MINE  RANK_SAVANT  DISAGREE  RANK_MOVE
+    Carter Jensen 7323     0.324      0.000           -0.145   3.117     33.000       16.000   -17.000         12
+    Austin Hedges 5026     0.331      0.007           -1.342   2.033     38.000       21.000   -17.000          4
+      Pedro Pagés 4613     0.323      0.001            0.227   3.336     29.000       15.000   -14.000          6
+      Drew Millas 3202     0.330      0.006            0.616   4.145     24.000       14.000   -10.000          6
+Christian Vázquez 5582     0.307      0.017            2.659   5.940     16.000        6.000   -10.000          3
+    Drake Baldwin 5466     0.318      0.006           -0.014   2.010     32.000       23.000    -9.000          4
+  Adley Rutschman 5458     0.317      0.007            3.276   6.423     13.000        5.000    -8.000          8
+   Drew Cavanaugh 3146     0.323      0.001           -3.978  -3.581     47.000       40.000    -7.000         -2
+
+  we rate these much higher than they do
+           NAME    N  EXP_RATE  STAFF_DEV  RUNS_WTD_SHRUNK  SAVANT  RANK_MINE  RANK_SAVANT  DISAGREE  RANK_MOVE
+    Nick Fortes 5510     0.334      0.010            0.074  -1.771     31.000       38.000     7.000         -4
+Shea Langeliers 5548     0.321      0.003           -2.241  -4.819     39.000       46.000     7.000         -8
+   Ryan Jeffers 5593     0.322      0.003            0.583  -1.308     26.000       35.000     9.000         -1
+ Salvador Pérez 3188     0.319      0.005           -3.259  -6.444     41.000       50.000     9.000         -5
+    Henry Davis 6260     0.328      0.004            1.155   0.217     20.000       30.000    10.000          0
+Víctor Caratini 5307     0.325      0.000            4.669   2.663      7.000       19.000    12.000          0
+     Jonah Heim 5404     0.303      0.021            1.717  -1.631     18.000       37.000    19.000         -8
+     Liam Hicks 4251     0.337      0.013            4.908   1.397      5.000       25.000    20.000        -10
+
+  what tracks the disagreement, across all 54 catchers
+  (|rank gap| against each candidate explanation)
+    distance of staff quality from league mean        Spearman -0.086 (p=0.538)
+    sensitivity to run-value weighting                Spearman +0.355 (p=0.009)
+    sample size (a null check — should be weak)       Spearman -0.062 (p=0.655)
+
+  the 9 catchers moving 10+ places against the other 45
+    mean staff quality             0.3232  vs  0.3245
+    mean |staff quality - league|  0.0076  vs  0.0070
+    mean |weighting move|          5.4  vs  3.1 places
+
+  reading these: the MEAN of staff quality is the wrong test, and
+  an earlier version of this function used it and found nothing —
+  a set holding both the highest and lowest staff averages back to
+  the middle. Extremity is the hypothesis, because Savant scores
+  only pitches near the zone edge, so a catcher whose staff locates
+  unusually well or badly has an unusual share of his takes inside
+  the window they evaluate. Sensitivity to run-value weighting
+  points instead at the two methods valuing counts differently.
+
+  wrote savant_comparison.png

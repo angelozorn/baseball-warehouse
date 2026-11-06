@@ -11,25 +11,27 @@ atomically so re-runs are safe. dbt then cleans that raw table into a staging
 view, filters it into `FCT_TAKES`, and attaches a location-based
 expected-strike baseline in `FCT_TAKES_EXPECTED`. A launchd agent runs the
 whole chain every morning. `analysis/evaluate_models.py` is the scoreboard every
-model is graded by, and `analysis/model_framing.py` holds the framing baseline,
-the catcher attribution and the chance test.
+model is graded by, `analysis/model_framing.py` holds the framing baseline and
+the chance test, and `analysis/framing_runs.py` converts the result to runs and
+validates it against Baseball Savant's published leaderboard.
 
 The warehouse holds the full 2026 regular season: 184 game days, 716,792
 events, 356,498 takes — plus postseason games as they are played, which staging
 keeps and the marts exclude.
 
 **The question, and the answer.** Can catcher framing be measured in public data,
-and separated from the quality of the pitching staff? Yes to the first: across 54
-qualified catchers the spread in strikes above expected is 33.58, against 13.70
-from chance, p < 0.001. Partly to the second: staff command is a real confound
-(slope −1,428 strikes per unit expected rate, t = −2.58) but explains only 12% of
-the between-catcher variance, and the spread still rejects chance after it is
-removed. Patrick Bailey, the one catcher here with an outside reputation to check
-against, lands 11th of 54 unadjusted and 7th adjusted.
+and separated from the quality of the pitching staff? Yes to the first: across
+54 qualified catchers the spread in strikes above expected is 33.58, against
+13.70 from chance, p < 0.001. Partly to the second: staff command is a real
+confound (−1,428 strikes per unit expected rate, t = −2.58) but explains only
+12%, and the spread survives removing it. In runs, one standard deviation of
+true catcher skill is **4.3 to 4.8 runs a season**, and the leaderboard
+correlates with Baseball Savant's independently built metric at **Spearman
++0.94** across all 54 catchers.
 
-**Project status: complete as scoped.** Layers 1 through 3b are built, tested and
-documented. *Where this stops* names the one design that would resolve what is
-left, and why it is a separate project rather than a missing piece of this one.
+**Project status: complete as scoped.** Layers 1 through 3c are built, tested
+and documented. *Conclusions* states what is established and what is not;
+*Where this stops* names the one design that would resolve the remainder.
 
 ---
 
@@ -74,6 +76,10 @@ Baseball Savant  ──(pybaseball)──▶  pandas DataFrame
                         │  imports the jury and the data pull
                         ▼
               analysis/model_framing.py              (smooth baseline, shrinkage, chance test)
+                        │
+                        │  imports the baseline and the attribution
+                        ▼
+              analysis/framing_runs.py               (runs conversion, Savant validation)
 ```
 
 Every ingest layer derives its path from a single function, `partition_tail(date)`,
@@ -85,11 +91,11 @@ Inside dbt, `{{ ref() }}` plays the same role: each model names its upstream
 rather than a hardcoded dataset, so dbt derives the build order from the SQL and
 the whole DAG retargets by changing one line in `profiles.yml`.
 
-The analysis layer follows the same rule in Python: `model_framing.py` imports
-the jury and the data pull from `evaluate_models.py` rather than reimplementing
-either, so no two layers are ever compared across different evaluation code.
-Both read `FCT_TAKES` rather than `FCT_TAKES_EXPECTED` — see *The harness reads
-the un-baselined mart* under Layer 3.
+The analysis layer follows the same rule in Python: each script imports the
+previous layer's jury, baseline and attribution rather than reimplementing them,
+so no two layers are ever compared across different evaluation code. All three
+read `FCT_TAKES` rather than `FCT_TAKES_EXPECTED` — see *The harness reads the
+un-baselined mart* under Layer 3.
 
 **Region note:** the GCS bucket, both BigQuery datasets, and the dbt profile are
 all `us-west1`. BigQuery cannot load from a bucket in a different location, and
@@ -216,11 +222,13 @@ python3 analysis/evaluate_models.py                      # raw coordinates
 python3 analysis/evaluate_models.py --features distance  # distance from zone centre
 
 OMP_NUM_THREADS=1 python3 analysis/model_framing.py      # L3b
+OMP_NUM_THREADS=1 python3 analysis/framing_runs.py       # L3c
 ```
 
 Output is committed to `analysis/results_raw.txt`,
-`analysis/results_distance.txt` and `analysis/results_framing.txt`. Every figure
-in the Layer 3 and Layer 3b sections is re-derivable from those files.
+`analysis/results_distance.txt`, `analysis/results_framing.txt` and
+`analysis/results_runs.txt`. Every figure in the Layer 3 sections is
+re-derivable from those files.
 
 **`OMP_NUM_THREADS=1` is not decoration.** `HistGradientBoostingClassifier`
 builds its histograms in parallel, and floating-point summation order varies with
@@ -235,8 +243,8 @@ OMP_NUM_THREADS=1 python3 analysis/model_framing.py | diff - analysis/results_fr
 ```
 
 A committed results file that does not reproduce is not evidence, which is why
-every L3b figure below is quoted to five decimals and the pin is part of the
-command rather than a footnote.
+every L3b and L3c figure below is quoted to five decimals and the pin is part of
+the command rather than a footnote.
 
 `model_framing.py` writes `analysis/catcher_names.csv` on its first run, from one
 `pybaseball` lookup, and reads that cache on every run afterward. The file is
@@ -245,6 +253,10 @@ results that depend on whether a lookup service answered are not reproducible.
 Hand edits survive, which is how `str.title()`'s "Mccann" became "McCann". That
 file is also the dbt seed this README has been promising since Layer 2; moving it
 to `transform/seeds/CATCHER_NAMES.csv` is the permanent fix.
+
+`framing_runs.py` additionally needs `analysis/savant_framing_2026.csv`, the
+published leaderboard downloaded from `baseballsavant.mlb.com/catcher_framing`.
+Without it the script runs and skips section 4.
 
 ---
 
@@ -486,6 +498,10 @@ not cast at ingest and unused columns are not dropped: if a type opinion turns
 out to be wrong, fixing it in staging costs a dbt run, while fixing it in the
 raw layer costs a full re-pull from Savant. Type opinions belong downstream,
 where they can change without a backfill.
+
+That the raw layer keeps everything paid off in L3c: `delta_run_exp` is not
+carried through staging and was never expected to be needed, but it is sitting
+in raw and is what the count-weighted run values are measured from.
 
 One caveat worth stating plainly: the Parquet engine already imposes a schema
 whether or not we ask it to, so "faithful" here means *we* add no opinions, not
@@ -753,6 +769,11 @@ excluded here as a decision about population, not an obvious truth — including
 would add ~15k rows of near-zero framing signal and skew the location
 distribution toward the dirt.
 
+**That decision is now measured rather than argued.** L3c's Savant comparison
+shows their called-pitch count running a median 1.043x this project's take count,
+and `blocked_ball` is 4.0% of takes-plus-blocked. The exclusion accounts for
+essentially the whole population difference between the two leaderboards.
+
 The automatic rulings deserve separate mention because the reason differs in
 kind: an automatic strike on a pitch-clock violation is a strike the catcher had
 no part in, and including it would credit or debit a catcher for an umpire's
@@ -954,14 +975,11 @@ invited a second look at where 33.9 came from — a near-match is the most
 comfortable kind of wrong answer, and the only thing that caught it was replacing
 the formula with a procedure that could not inherit its assumption.
 
-**Location control is still not sufficient**, and the reason determines what
-Layer 3 must contain.
-
-If umpires give pitchers with established command more benefit of the doubt on
-borderline pitches — a reputation effect belonging to the pitcher — the extra
-strikes still accrue to whoever is catching. The expected-strike baseline cannot
-see this, because it conditions only on where the pitch crossed, not on who
-threw it.
+**Location control is still not sufficient.** If umpires give pitchers with
+established command more benefit of the doubt on borderline pitches — a
+reputation effect belonging to the pitcher — the extra strikes still accrue to
+whoever is catching. The expected-strike baseline cannot see this, because it
+conditions only on where the pitch crossed, not on who threw it.
 
 There is also published work on sequential effects in umpire calls (Chen,
 Moskowitz & Shue, on the gambler's fallacy) reporting that umpires are *less*
@@ -1001,7 +1019,9 @@ it understated him by roughly a factor of 2.4. His corrected position is in
 *The external check* under Layer 3b.
 
 **No other covariates.** Count, handedness and pitch type all shift the called
-zone and are not conditioned on.
+zone and are not conditioned on. L3c quantifies how much the count matters: the
+run value of a flip ranges 7.8x across the twelve count states, so a baseline
+blind to the count is blind to most of the leverage.
 
 Bailey is the most valuable row in the table precisely because there is an
 outside opinion to check against. The method points the right direction and
@@ -1083,8 +1103,8 @@ data and would not be for anything else.
 
 **The workbook is built on the binned baseline, which matters for its text.** The
 Layer 3b corrections to `docs/dashboard_copy.md` fix the chance-spread arithmetic
-without quoting Layer 3b's model-specific figures, because putting a smooth-model
-number on a bin-based chart would be a new version of the same error.
+without quoting Layer 3b's model-specific figures on bin-based charts, because
+that would be a new version of the error it is correcting.
 
 ### The views
 
@@ -1167,6 +1187,11 @@ stay hidden on Tableau Public, which is how a workbook ends up published with
 only its text tab visible. Unhide every sheet and check *Show sheets as tabs*
 before publishing, then verify in a private browser window — the author's own
 session shows sheets a visitor cannot see.
+
+**Text objects clip rather than scroll**, and web authoring on Tableau Public is
+unreliable for editing them — a greyed-out OK button means the dialog never
+registered the change. Edit in Desktop and republish under the same workbook
+name, which overwrites in place and keeps the URL.
 
 ### ABS challenge data: looked at and rejected
 
@@ -1506,6 +1531,16 @@ expectations would be in-sample, each pulled toward its own outcome, which
 shrinks strikes above expected toward zero and biases a chance test toward
 finding nothing. That is the one direction a chance test must not be biased in.
 
+**That protection is partial, and the bound belongs here.** Grouping by game
+removes the pitch's own game, but a catcher appears in roughly 130 games and four
+fifths of them sit in the training set of any given fold. His contribution to the
+fitted surface survives at about 80%. The absorption is small — a catcher with
+5,400 takes is 1.5% of the data, and with `min_samples_leaf=200` his share of a
+typical leaf stays near that, so his effect is understated by something like 1.5%,
+or half a strike on an SAE of 33. The complete fix is `GroupKFold` on
+`CATCHER_ID`, fitting the surface on other catchers entirely. Not done; the
+residual bias is conservative in direction and bounded by that estimate.
+
 Catcher labels are then permuted **within 20 strata of the baseline's own
 predicted probability**, 1,000 times.
 
@@ -1625,9 +1660,11 @@ that was the expected outcome when the code was written.
 
 **Quote `sqrt(τ²)` for the spread, not a column's standard deviation.** Raw SAE
 has sd 33.58, shrunk 28.68, adjusted 26.86 — and none of the three estimates the
-true spread, because posterior means under-disperse by construction. The estimate
-is 0.65 points of called-strike rate unadjusted, 0.61 adjusted, or about 34
-strikes over a median season.
+true spread, because posterior means under-disperse by construction. Mechanically,
+`Var(θ̂) = w̄ · τ² < τ²`: the construction multiplies every estimate by a factor
+below one, so a narrower collection is guaranteed by arithmetic rather than
+produced by this sample. The raw column overstates by the noise and the shrunk
+column understates by the shrinkage; τ² is the quantity built to be neither.
 
 ### The external check
 
@@ -1660,45 +1697,262 @@ figures computed independently under the binned baseline: Contreras .343/.345 an
 8,798 takes against .3428/.3456, Bailey .331/.326 against .3306/.3270, Heim
 .304/.304 and 5,404 takes against .3042/.3044.
 
-### What is and is not established
+---
 
-**Established.** Catchers differ in called strikes above expected by more than
-chance, decisively (33.58 against 13.70, p < 0.001, 14.2 null SDs). Pitching-staff
-command is a real confound, measured twice at −1,328 and −1,428 strikes per unit
-expected rate, and it accounts for 12% of the between-catcher variance. The spread
-survives removing it. The true spread is between 0.61 and 0.65 points of
-called-strike rate, about 34 strikes a season at one standard deviation.
+## Layer 3c — runs, and validation against an outside metric
 
-**Not established.** That the surviving variation is *framing skill*. Catcher
-identity remains nearly collinear with home park and umpire-crew exposure, neither
-of which the staff adjustment touches, and 54 catchers across 30 teams leaves
-little room to separate a catcher from his circumstances by regression. The
-chance test proves catcher identity carries information the baseline lacks; it
-cannot say what that information is about.
+`analysis/framing_runs.py`. Results in `analysis/results_runs.txt`.
+
+### The run value of a called strike is not one number
+
+Converting strikes above expected into runs needs a run value per called strike.
+The canonical figure is about 0.125. But the value of flipping a ball into a
+strike depends on the count, and this project has `BALLS` and `STRIKES` on every
+take, so the dependence can be measured rather than assumed.
+
+Statcast carries `delta_run_exp`, the change in run expectancy attributable to
+each pitch from the batting team's point of view. Within a count, the difference
+between the average for a ball and the average for a called strike **is** what
+flipping that call is worth:
+
+```
+run value of a flip in count (b,s)
+    = mean(delta_run_exp | ball, b, s) - mean(delta_run_exp | called_strike, b, s)
+```
+
+Measured over all 356,688 takes:
+
+```
+0-0  0.0792      1-0  0.1164      2-0  0.1779      3-0  0.1977
+0-1  0.0863      1-1  0.1191      2-1  0.1848      3-1  0.2901
+0-2  0.1896      1-2  0.2331      2-2  0.3276      3-2  0.6157
+```
+
+**The structure is terminality.** A flip matters most when one of the two
+outcomes ends the plate appearance. Every two-strike count roughly doubles off
+its one-strike neighbour (0-1 → 0-2: 0.086 → 0.190) because the strike ends it.
+Every three-ball count is elevated because the *ball* ends it. And 3-2 is the
+only count where **both** outcomes are terminal — a flip converts a walk into a
+strikeout — which is why it reads 0.6157, nearly **eight times** a 0-0 flip.
+
+Measuring these from the same 184 days as the framing estimates means the run
+environment matches by construction rather than by assumption, and it makes the
+count dependence visible instead of asserted.
+
+**The canonical 0.125 is biased low, not merely imprecise.** The
+occurrence-weighted value across this take population is **0.1493**, 19% higher.
+Takes skew heavily toward 0-0 — a third of them, at the lowest value — but the
+high-leverage tail outweighs that. So a flat value understates framing in
+aggregate on top of mis-ranking individuals.
+
+Two count states fall below 200 of either outcome and would use the pooled value;
+in this season none did.
+
+### What count weighting costs
+
+Runs are a weighted sum of the same per-pitch residuals the strike counts use, so
+the sampling variance is `Σ v(count)² · p(1−p)` — not the strike variance
+rescaled. A catcher who earns his extra strikes on two-strike counts gets more
+runs per strike **and** more variance per strike, so `τ²` has to be re-estimated
+on the runs scale rather than inherited.
+
+```
+                 tau^2        noise      S/N   reliability   1 SD / season
+flat 0.125     6.600e-07    1.149e-07   5.75      0.853        4.3 runs
+weighted       8.158e-07    2.011e-07   4.06      0.805        4.8 runs
+```
+
+**Count weighting finds more true signal and measures it worse.** τ² rises 24%,
+because the high-leverage counts are where catchers differ most — but sampling
+noise rises 75%, because those counts are rare. Signal-to-noise falls from 5.75
+to 4.06, and shrinkage tightens from a 0.772 floor to 0.691.
+
+So the weighted metric is **the more correct target and the less precise
+estimate**. A 3-2 flip really is worth eight 0-0 flips; inferring a catcher's
+high-leverage performance from a few thousand pitches is genuinely harder than
+inferring his overall performance from all of them. Not a free upgrade.
+
+**An internal check:** 34 strikes × 0.125 = 4.25 runs against the flat model's
+measured 4.3. The strike-scale and runs-scale estimates agree to two digits by
+independent routes.
+
+### How much the weighting moves the leaderboard
+
+```
+correlation of values       0.9609
+rank correlation            0.9530
+mean absolute rank change   3.48 places
+largest rank change         12 places
+catchers moving 5+ places   16 of 54
+```
+
+The aggregate ordering is stable; individual placement is not. **Liam Hicks rises
+ten places** (15th → 5th) because he earns his extra strikes where they are worth
+most; **Adley Rutschman falls eight** (5th → 13th) because his come cheap. The
+flat value is adequate for "is this catcher good" and misleading for "how good."
+
+Dillon Dingler leads either way at **+9.09 runs**; Tyler Stephenson is last at
+**−7.37**. About 16 runs separates best from worst, or roughly a win and a half
+at the conventional ten runs per win. Bailey sits 9th at +3.78.
+
+**The runs leaderboard is not staff-adjusted.** It is built from raw strikes above
+expected. `EXP_RATE` travels with it in
+`analysis/framing_runs_leaderboard.csv` so the adjustment can be applied, but the
+published leaderboard is the unadjusted one and L3b's staff finding is measured on
+a different basis. Said here because a reader would otherwise have to infer it.
+
+The sum of runs over the 54 qualified catchers — +12.2 flat, +11.4 weighted — is
+near zero by construction and is **not** a league total.
+
+### Validation against Baseball Savant
+
+Savant publishes a 2026 catcher framing leaderboard built independently, on a
+different population and a different baseline. All 54 qualified catchers matched
+on MLBAM id.
+
+```
+flat, shrunk              Spearman +0.937 (p=2.1e-25)   Pearson +0.947
+count-weighted, shrunk    Spearman +0.890 (p=2.2e-19)   Pearson +0.915
+staff-adjusted strikes    Spearman +0.816 (p=5.4e-14)   Pearson +0.839
+```
+
+**ρ = 0.94 against an independently constructed published metric** is the
+strongest external validation available to this project. The staff-adjusted
+version correlating lowest is a pass rather than a failure: Savant does not
+adjust for staff, so a metric that does should move away from theirs, and
+confirming that it does is a check on the adjustment.
+
+**The population difference, predicted and confirmed.** Savant's called-pitch
+counts run a median **1.043x** this project's take counts (range 1.030–1.060).
+`blocked_ball` is 14,894 league-wide, 4.0% of takes-plus-blocked, and this
+project excludes it. One documented filter decision accounts for essentially the
+whole population gap between the two leaderboards — see *Takes filter*.
+
+### What explains the disagreement
+
+Two hypotheses were tested against all 54 catchers rather than against the
+extremes of a sorted table, plus a deliberate null check:
+
+```
+sensitivity to run-value weighting           Spearman +0.355 (p=0.009)
+distance of staff quality from league mean   Spearman -0.086 (p=0.538)
+sample size (null check)                     Spearman -0.062 (p=0.655)
+```
+
+**The null check passing matters.** Sample size showing nothing means the method
+is not finding correlations everywhere, so the one positive result is not an
+artefact of the frame.
+
+**Run-value weighting is the explanation, and the signed test is decisive.** The
+absolute-value correlation above is suggestive; the signed version settles it:
+
+```
+corr(DISAGREE, RANK_MOVE) = -0.568   p = 7.4e-6
+```
+
+The catchers this project's count weighting *promotes* are precisely the ones
+Savant *demotes*. Jensen moves +12 places under weighting and Savant rates him 17
+places higher; Rutschman +8 and 8 higher; Hicks **−10** and Savant rates him 20
+places lower. **Savant's `rv_tot` behaves like a flat-weighted metric rather than
+a count-weighted one** — an inference about another method's internals drawn from
+nothing but its published outputs.
+
+**Why the correlation gap alone could not have told us that.** The flat version
+correlates 1.035x better than the weighted one in Pearson terms. But the weighted
+metric is noisier, and correlation against any external measure attenuates by
+roughly the square root of reliability — 0.853 against 0.805 predicts a 1.029x
+gap from noise alone. The observed gap is inside the attenuation floor and says
+nothing. The signed test is immune to this, because attenuation is about overall
+noise level and would show up as disagreement tracking *sample size*, which it
+does not.
+
+The script prints that attenuation floor beside the correlations so the invalid
+inference cannot be made again by whoever reads it next.
+
+**Shadow-zone exposure was proposed and refuted.** Savant evaluates only pitches
+near the zone edge, so a catcher whose staff locates unusually well or badly
+should have an unusual share of his takes inside their window — which predicts
+disagreement tracking the *distance* of staff quality from the league mean. It
+does not: ρ = −0.086, wrong sign, p = 0.538, and the split comparison agrees
+(0.0076 against 0.0070). The hypothesis came from noticing that Heim (lowest
+staff quality) and Hicks (highest) were the two largest disagreements — in a
+table **sorted by disagreement**, which guarantees extremes at its ends. The
+mechanism may well be real; this data cannot see it.
+
+---
+
+## Conclusions
+
+**The question.** Can catcher framing be measured from public pitch-level data,
+and separated from the quality of the pitching staff?
+
+**Can it be measured: yes, and the measurement validates externally.** Across 54
+catchers with 3,000+ takes, the spread in strikes above expected is 33.58 against
+13.70 from a permutation null — fourteen null standard deviations out, p below the
+resolution of a thousand shuffles. One standard deviation of true catcher skill is
+0.61 to 0.65 points of called-strike rate, about 34 strikes or 4.3 to 4.8 runs
+across a season. The resulting leaderboard correlates with Baseball Savant's
+independently built metric at Spearman +0.94 on all 54 catchers, and the
+population difference between the two lists is fully accounted for by one
+documented filter decision.
+
+**Can it be separated from the staff: partly, and the residual is the limit.**
+Pitching-staff command is a real confound, measured twice at −1,328 and −1,428
+strikes per unit expected rate by different methods on different baselines, and
+it accounts for 12% of the between-catcher variance. Remove it and the spread
+still rejects chance at p = 0.001. But catcher identity remains nearly collinear
+with home park and umpire-crew exposure, which the adjustment does not touch, and
+54 catchers across 30 teams leaves little room to separate a man from his
+circumstances by regression. **The chance test proves catcher identity carries
+information the baseline lacks; it does not prove that information is framing
+skill.**
+
+**What would change the answer.** A within-team contrast — a starter against his
+own backup, who share the staff, the park and the crews. That removes the
+confound by design rather than by modelling, needs no slope to estimate, and has
+no over-control caveat. It is thin on one season of data and wants several.
+
+**What the project demonstrates about method, which is the part worth reading.**
+Seven claims in this repository were made and withdrawn, and the *Corrections*
+table below lists each with what caught it. The pattern is consistent: five of
+the seven were caught by a check that did not share the broken assumption, and
+the two that were not were one error propagating into a second claim. The
+longest-lived error survived because it **agreed** with the number beside it —
+33.5 against 33.9 reads as confirmation, and a figure that matches its neighbour
+gets re-examined least. Twice an inference was built from the extremes of a table
+sorted by the very quantity being explained, and twice a correlation across all
+the data refused it.
+
+The deliverables are a pipeline that runs unattended, a set of estimates that
+survive an external check, and a written record of every conclusion that did not
+survive. The third is the one that took the longest and is the hardest to fake.
 
 ---
 
 ## Where this stops
 
 The project is complete as scoped. One design would resolve what is left, and it
-is a separate project rather than a missing piece of this one.
+is a separate project rather than a missing piece of this one: **the within-team
+contrast** described under *Conclusions*.
 
-**The within-team contrast.** Compare a starter against his own backup. They
-share the pitching staff, the home park and roughly the same umpire crews, so the
-between-team component drops out of the contrast instead of being modelled away —
-no slope to estimate, no over-control caveat, no uncertainty to propagate into
-extreme-`EXP_RATE` catchers. The cost is power: backups accumulate few takes, so
-one season of pairs is thin and the design wants several.
-
-Two smaller items the measurements above point at, both cheap and both deferred:
+Three smaller items the measurements point at, all cheap and all deliberately
+deferred:
 
 - **Flexibility in the borderline band specifically.** The GBM's own worst
   calibration sits at 0.3503 and 0.8748, and that band is 28% of pitches and 93%
   of the modelling gain. The aggregate score should not be the objective for a
   question that lives in one band.
+- **`GroupKFold` on `CATCHER_ID`** instead of `GAME_PK`, which would remove the
+  ~1.5% catcher absorption bounded under *The chance test* rather than leaving it
+  as a stated limitation.
 - **The previous pitch's call as a feature**, testing the sequential-effects
   result cited under *Why location-controlled still isn't framing* against 2026
   data.
+
+A Streamlit app over `framing_runs_leaderboard.csv` would also be a natural
+front end. It is not built: Streamlit Community Cloud cannot reach this BigQuery
+project, so the app would need a committed aggregate and a deploy pipeline of its
+own.
 
 ---
 
@@ -1749,20 +2003,20 @@ glues the first new pattern onto the last old one, producing a single dead rule.
 right way to verify: it asks git what git thinks instead of reading the file and
 inferring.
 
-**Two exceptions in `analysis/`, both deliberate.**
+**Exceptions in `analysis/`, all deliberate.**
 
 `analysis/results_*.txt` are run output, which the rule above would ordinarily
-ignore — but they are the evidence behind every figure in the Layer 3 and
-Layer 3b sections, and a claim whose evidence lives only on one laptop is not a
-claim. They change only when a model changes, so they carry information rather
-than churn.
+ignore — but they are the evidence behind every figure in the Layer 3 sections,
+and a claim whose evidence lives only on one laptop is not a claim. They change
+only when a model changes, so they carry information rather than churn.
 
-`analysis/catcher_names.csv` needs an explicit negation —
-`!analysis/catcher_names.csv` — because `*.csv` catches it. It is tracked so a
-clone reproduces the leaderboard with names and no network call, and because a
-results file whose contents depend on whether a lookup service answered is not
-reproducible. The same reasoning that excludes the heartbeats includes both of
-these.
+`analysis/catcher_names.csv`, `analysis/framing_runs_leaderboard.csv` and
+`analysis/savant_framing_2026.csv` each need an explicit negation, because
+`*.csv` catches them. The first is tracked so a clone reproduces the leaderboard
+with names and no network call. The second is the published leaderboard itself.
+The third is third-party input that the Savant comparison cannot be reproduced
+without, and which Savant may revise. The same reasoning that excludes the
+heartbeats includes all of these.
 
 `packages.yml` and `package-lock.yml` are tracked; `dbt_packages/` is not — the
 same relationship as `requirements.txt` to `venv/`. The lock file pins the
@@ -1797,11 +2051,18 @@ entry.
 | Patrick Bailey is +0.63 SD | Divided by the same inflated standard error | The same correction |
 | The smooth model's gain is mostly on easy pitches | Backwards: 93% of it is on the 28% of pitches whose call was in doubt. The hedged 0.0785 decile offered as evidence is *inside* the borderline band | The band comparison, once a bug stopped it selecting every row |
 | Staff quality dominates the leaderboard | An `EXP_RATE` gap read as a fraction of its own range rather than multiplied by the slope; it is 12% | Weighted least squares, agreeing with the eyeball once the eyeball did the arithmetic |
+| The flat-vs-Savant correlation gap shows how Savant weights counts | The gap (1.035x) is inside the attenuation floor (1.029x) that the weighted metric's extra noise already predicts. The conclusion turned out to be right; this evidence for it was not | Computing the attenuation floor, then testing the signed correlation instead |
+| Savant disagreement tracks staff-quality extremity | ρ = −0.086, wrong sign, p = 0.538. The hypothesis came from the two most extreme rows of a table *sorted by disagreement*, which guarantees extremes at its ends | A correlation across all 54 catchers, plus a sample-size null check that correctly found nothing |
 
-Four of the seven were caught by a check that did not share the broken
-assumption. Two were one error propagating. The one that survived longest is the
-chance spread, and it survived because **33.5 and 33.9 agreed** — a near-match
-reads as confirmation and gets re-examined least.
+Five of the nine were caught by a check that did not share the broken assumption.
+Two were one error propagating into a second claim. Two were inferences drawn
+from the extremes of a table sorted by the quantity being explained — the same
+mistake twice, caught both times by widening to all the data.
+
+The one that survived longest is the chance spread, and it survived because
+**33.5 and 33.9 agreed.** A near-match reads as confirmation, so it gets
+re-examined least. A row that matches its neighbour is the most dangerous row in
+any table here, not the safest.
 
 ---
 
@@ -1821,4 +2082,5 @@ reads as confirmation and gets re-examined least.
 | Layer 2 — Tableau Public dashboard | ✅ |
 | L3a — evaluation harness + baselines | ✅ |
 | L3b — smooth baseline, partial pooling, chance test | ✅ |
-| **Project complete as scoped** — see *Where this stops* | |
+| L3c — runs conversion, Savant validation | ✅ |
+| **Project complete as scoped** — see *Conclusions* and *Where this stops* | |

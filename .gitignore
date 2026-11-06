@@ -13,3 +13,7 @@ backfill_run.log
 last_run.txt
 last_data_loaded.txt
 tableau/
+!app/data/*.csv
+
+!analysis/framing_runs_leaderboard.csv
+!analysis/savant_framing_2026.csv
